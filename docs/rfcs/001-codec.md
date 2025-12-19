@@ -55,10 +55,9 @@ type config = {
 
 This approach has several drawbacks:
 
-1. **Code duplication**: Each format requires separate derive annotations
-2. **Inconsistent APIs**: Different libraries have different conventions
-3. **No format abstraction**: Code is coupled to a specific format
-4. **Testing complexity**: Each format needs separate test coverage
+1. **Inconsistent APIs**: Different libraries have different conventions
+2. **No format abstraction**: Code is coupled to a specific format
+3. **Testing complexity**: Each format needs separate test coverage
 
 ### The Solution
 
