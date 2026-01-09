@@ -237,14 +237,16 @@ val user_codec : (user, Json.t) Codec.t
 let json = Codec.encode user_codec { name = "Alice"; age = 30 }
 let user = Codec.decode user_codec json
 
-(* Compose naturally *)
-let users_codec = Codec.list Json.list user_codec
+(* Compose naturally: build a codec for user list -> JSON array *)
+let users_codec : (user list, Json.t) Codec.t =
+  Codec.list Json.list user_codec
 let serialize_list users = Codec.encode users_codec users
 
 (* Pass as argument *)
 let save_to_file : ('a, Json.t) Codec.t -> 'a -> string -> unit =
   fun codec value path ->
-    Codec.encode codec value |> Json.to_string |> write_file path
+    let json_str = Codec.encode codec value |> Json.to_string in
+    Out_channel.with_open_text path (fun oc -> Out_channel.output_string oc json_str)
 ```
 
 ### Comparison Table
@@ -305,7 +307,7 @@ type ('a, 'b) t  (* A codec from 'a to 'b *)
 
 val make : encode:('a -> 'b) -> decode:('b -> 'a) -> ('a, 'b) t
 val encode : ('a, 'b) t -> 'a -> 'b
-val decode : ('a, 'b) t -> 'b -> 'a
+val decode : ('a, 'b) t -> 'b -> 'a  (* Currently raises on error, see Proposed Improvements *)
 ```
 
 ### Combinators
@@ -374,7 +376,10 @@ codec/                    # Core library (no format dependencies)
 ppx_codec/               # PPX deriver (separate package)
 ├── ppx_codec.opam       # Depends on: codec, ppxlib
 └── src/
-    └── ppx_codec.ml
+    ├── ppx_codec.ml     # Deriver registration and entry point
+    ├── gen_encode.ml    # Encoder generation logic
+    ├── gen_decode.ml    # Decoder generation logic
+    └── utils.ml         # Shared helpers (attribute parsing, etc.)
 │
 codec-json/              # Optional: JSON driver (separate package)
 ├── codec-json.opam      # Depends on: codec, yojson
@@ -416,7 +421,8 @@ module type DRIVER = sig
 end
 ```
 
-A custom driver for, say, a proprietary binary format would look like:
+A custom driver for, say, a proprietary binary format would look like
+(simplified, without error handling):
 
 ```ocaml
 module My_binary_driver : Codec.DRIVER = struct
@@ -561,7 +567,7 @@ A developer wants to serialize OCaml values to a simple tagged format for
 debugging or logging:
 
 ```ocaml
-(* Define a trivial driver in ~30 lines *)
+(* Define a trivial driver in a few dozen lines *)
 module Debug_driver : Codec.DRIVER = struct
   type t = string
 
@@ -636,9 +642,9 @@ let config = Codec.decode config_yaml_codec yaml_data
 
 4. **Driver at compile-time vs runtime**: The current PPX requires specifying
    the driver at compile time. Should we support runtime driver selection?
-   This would require a more complex type:
+   This would require a more complex type using rank-2 polymorphism:
    ```ocaml
-   type 'a codec = { encode: 'driver. 'a -> 'driver; ... }  (* Not valid OCaml *)
+   type 'a codec = { encode: 'driver. 'a -> 'driver; ... }
    ```
 
 5. **Attribute syntax**: Should we use `[@codec.name]` namespace or keep the
