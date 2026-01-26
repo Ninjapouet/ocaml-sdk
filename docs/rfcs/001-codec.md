@@ -628,6 +628,101 @@ let config = Codec.decode config_codec json_data
 let config = Codec.decode config_yaml_codec yaml_data
 ```
 
+## Alternatives Considered
+
+### Runtime Type Representation Approach
+
+An alternative architecture would be to generate a *runtime representation* of
+types rather than generating codec code directly. This approach is used by
+libraries like Jane Street's `typerep` and MirageOS's `Repr`.
+
+**How it works:**
+
+```ocaml
+(* Instead of generating codec code, generate a type representation *)
+type user = { name: string; age: int }
+[@@deriving typerep]
+
+(* Generated: a value describing the type structure *)
+val typerep_of_user : user Typerep.t
+
+(* Then, generic functions interpret this representation *)
+let json = Generic_json.encode typerep_of_user { name = "Alice"; age = 30 }
+let yaml = Generic_yaml.encode typerep_of_user { name = "Alice"; age = 30 }
+let schema = Generic_schema.generate typerep_of_user
+```
+
+**Advantages:**
+
+1. **Maximum reusability**: Derive once, use for any operation (serialization,
+   pretty-printing, comparison, schema generation, validation, diffing, etc.)
+
+2. **Decoupled evolution**: New interpreters can be added without modifying
+   type definitions or re-running the PPX
+
+3. **Smaller generated code**: Only the type structure is generated, not
+   format-specific code for each driver
+
+4. **Runtime flexibility**: The same representation works with any interpreter,
+   chosen at runtime
+
+**Trade-offs:**
+
+1. **Runtime overhead**: Each operation must interpret the type structure at
+   runtime. However, this overhead is typically negligible:
+   - Passing an extra argument (the type representation) is cheap
+   - Pattern matching on type structure compiles to efficient jump tables
+   - Real serialization work (string allocation, I/O) dominates the cost
+   - Only problematic for tight loops on millions of small values
+
+2. **API complexity**: Users must understand the type representation abstraction,
+   not just encode/decode functions
+
+3. **Less compile-time optimization**: The compiler cannot inline format-specific
+   code, though this rarely matters in practice
+
+### Use Existing Library vs. Define Our Own?
+
+If we pursue the runtime type representation approach, we must decide whether
+to reuse an existing library or define our own:
+
+#### Option A: Use `typerep` (Jane Street)
+
+**Pros:**
+- Mature, production-tested
+- Rich generic programming capabilities
+- Good for type equality proofs
+
+**Cons:**
+- Designed for Jane Street's ecosystem, may not fit our needs perfectly
+- Adds dependency on Jane Street libraries
+- No built-in serialization (we'd still need to write interpreters)
+
+#### Option B: Use `Repr` (MirageOS/Irmin)
+
+**Pros:**
+- Battle-tested in Irmin (distributed database)
+- Includes efficient binary and JSON serialization
+- Good performance characteristics
+
+**Cons:**
+- Heavy dependency, designed for MirageOS/Irmin needs
+- May include features we don't need
+- Less control over the representation design
+
+#### Option C: Define Our Own Lightweight Representation
+
+**Pros:**
+- Minimal dependencies (aligned with codec's philosophy)
+- Tailored to our exact needs
+- Full control over design decisions
+- Can be kept simple and focused
+
+**Cons:**
+- Development and maintenance cost
+- Yet another type representation in the ecosystem
+- Must prove correctness and performance ourselves
+
 ## Open Questions
 
 1. **Naming**: Should the library be called `codec`, `encoding`, `serial`, or
