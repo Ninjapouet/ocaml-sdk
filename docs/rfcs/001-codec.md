@@ -198,6 +198,59 @@ Jane Street's serialization PPXs for S-expressions and binary protocols.
 - Core/Base ecosystem dependency
 - No driver abstraction
 
+#### 6. ATD (Adaptable Type Definitions)
+
+[ATD](https://github.com/ahrefs/atd) takes a fundamentally different approach:
+types are defined in a separate `.atd` IDL file, and a code generator produces
+OCaml types along with serialization functions.
+
+```
+(* user.atd *)
+type user = {
+  name: string;
+  age: int;
+}
+```
+
+```sh
+$ atdgen -t user.atd   # generates user_t.ml(i) (types)
+$ atdgen -j user.atd   # generates user_j.ml(i) (JSON serializers)
+```
+
+**Strengths:**
+- Cross-language code generation from a single source (OCaml, TypeScript,
+  Python, Java, Scala, C++, D)
+- Generated code is readable and can be reviewed/versioned
+- Protocol compatibility checking via `atddiff`
+- Efficient binary format (Biniou) in addition to JSON
+- Well-suited for API contracts between services
+- Production-tested at Ahrefs
+
+**Limitations:**
+- Types live in separate `.atd` files, not inline OCaml
+- Limited type expressivity (no GADTs, no OCaml-specific features) to maintain
+  cross-language compatibility
+- Extra build step (code generation before compilation)
+- No first-class codec values or composition
+- Generated functions are format-specific, not driver-abstract
+
+**Positioning with codec:**
+
+ATD and codec are complementary rather than competing:
+
+- **ATD** excels at defining shared data contracts between services in different
+  languages. When the problem is "I need the same types in OCaml, TypeScript,
+  and Python", ATD is the right tool.
+
+- **Codec** excels at serializing OCaml-native types with full type system
+  expressivity (GADTs, polymorphic variants, etc.), first-class composition,
+  and custom driver support. When the problem is "I need to serialize complex
+  OCaml types to various formats", codec is the right tool.
+
+In practice, both could coexist in the SDK: ATD for externally-facing API types
+shared across language boundaries, and codec for internal OCaml types that
+need flexible serialization.
+
 ### API Comparison: ppx_protocol_conv vs codec
 
 To illustrate the difference in ergonomics, here's how the same task looks
@@ -251,22 +304,24 @@ let save_to_file : ('a, Json.t) Codec.t -> 'a -> string -> unit =
 
 ### Comparison Table
 
-| Feature                    | yojson | protocol_conv | data-encoding | repr | codec (ours) |
-|----------------------------|--------|---------------|---------------|------|--------------|
-| Driver-based               | No     | Yes           | Partial       | No   | Yes          |
-| First-class codec values   | No     | No            | Yes           | Yes  | Yes          |
-| PPX support                | Yes    | Yes           | No            | Yes  | Yes          |
-| Codec combinators          | No     | No            | Yes           | Yes  | Yes          |
-| Runtime driver selection   | N/A    | No            | N/A           | No   | Yes          |
-| Lightweight core           | Yojson | Heavy         | Heavy         | repr | fmt only     |
-| Binary size impact         | Medium | High          | High          | High | Low          |
-| Streaming (via composition)| No     | No            | Partial       | No   | Yes          |
-| Easy custom drivers        | N/A    | Medium        | Hard          | Hard | Yes          |
-| Ergonomic API              | Medium | Low           | Low           | Medium | High       |
-| Custom field names         | Yes    | Yes           | Manual        | Yes  | Yes          |
-| Default values             | Yes    | Yes           | Manual        | No   | Yes          |
-| Recursive types            | Yes    | Yes           | Yes           | Yes  | Yes          |
-| Parametric types           | Yes    | Yes           | Yes           | Yes  | Yes          |
+| Feature                    | yojson | protocol_conv | data-encoding | repr | ATD    | codec (ours) |
+|----------------------------|--------|---------------|---------------|------|--------|--------------|
+| Driver-based               | No     | Yes           | Partial       | No   | No     | Yes          |
+| First-class codec values   | No     | No            | Yes           | Yes  | No     | Yes          |
+| PPX / inline types         | Yes    | Yes           | No            | Yes  | No     | Yes          |
+| Codec combinators          | No     | No            | Yes           | Yes  | No     | Yes          |
+| Runtime driver selection   | N/A    | No            | N/A           | No   | N/A    | Yes          |
+| Lightweight core           | Yojson | Heavy         | Heavy         | repr | Low    | fmt only     |
+| Binary size impact         | Medium | High          | High          | High | Low    | Low          |
+| Streaming (via composition)| No     | No            | Partial       | No   | No     | Yes          |
+| Easy custom drivers        | N/A    | Medium        | Hard          | Hard | N/A    | Yes          |
+| Ergonomic API              | Medium | Low           | Low           | Medium | High | High         |
+| Custom field names         | Yes    | Yes           | Manual        | Yes  | Yes    | Yes          |
+| Default values             | Yes    | Yes           | Manual        | No   | Yes    | Yes          |
+| Recursive types            | Yes    | Yes           | Yes           | Yes  | Yes    | Yes          |
+| Parametric types           | Yes    | Yes           | Yes           | Yes  | Yes    | Yes          |
+| Cross-language support     | No     | No            | No            | No   | Yes    | No           |
+| Full OCaml type system     | Yes    | Partial       | Yes           | Yes  | No     | Yes          |
 
 ### Why a New Library?
 
@@ -762,4 +817,5 @@ For users of `ocamlpro-stdlib`:
 - [data-encoding (Tezos)](https://octez.tezos.com/docs/developer/data_encoding.html)
 - [Repr (MirageOS)](https://mirage.github.io/repr/repr/Repr/index.html)
 - [ppx_sexp_conv](https://opam.ocaml.org/packages/ppx_sexp_conv/)
+- [ATD (Adaptable Type Definitions)](https://github.com/ahrefs/atd)
 - [Real World OCaml - Data Serialization](https://dev.realworldocaml.org/data-serialization.html)
