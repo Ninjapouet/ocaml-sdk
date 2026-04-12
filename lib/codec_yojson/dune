@@ -1,0 +1,6 @@
+(library
+ (name codec_yojson)
+ (public_name codec-yojson)
+ (libraries codec yojson)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))

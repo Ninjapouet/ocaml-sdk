@@ -1,0 +1,8 @@
+(executable
+ (name test_ppx_codec)
+ (libraries codec codec-yojson)
+ (preprocess (pps ppx_codec ppx_inline_test ppx_expect)))
+
+(rule
+ (alias runtest)
+ (action (run ./test_ppx_codec.exe)))

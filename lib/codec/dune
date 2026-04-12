@@ -1,0 +1,6 @@
+(library
+ (name codec)
+ (public_name codec)
+ (libraries fmt)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
