@@ -177,18 +177,12 @@ let parse_then_decode repr s =
 (* -- Correctness tests --------------------------------------------------- *)
 
 type user = { name : string; age : int; email : string option }
-
-let user_repr =
-  Codec.record "user" (fun name age email -> { name; age; email })
-  |> Codec.field "name" Codec.string (fun u -> u.name)
-  |> Codec.field "age" Codec.int (fun u -> u.age)
-  |> Codec.field_opt "email" Codec.string (fun u -> u.email)
-  |> Codec.seal
+[@@deriving codec]
 
 let () =
   let u = { name = "Alice"; age = 30; email = Some "alice@example.com" } in
-  let s = Json_stream.encode user_repr u in
-  assert (parse_then_decode user_repr s = u);
+  let s = Json_stream.encode user_codec u in
+  assert (parse_then_decode user_codec s = u);
   print_endline "PASS: streaming record round-trips via Yojson decode"
 
 let () =
@@ -199,22 +193,12 @@ let () =
   print_endline "PASS: streaming tuples, options, lists"
 
 type shape = Point | Circle of float | Box of float * float
-
-let shape_repr =
-  Codec.variant "shape" [
-    Codec.case0 "Point" Point;
-    Codec.case "Circle" Codec.float
-      (function Circle r -> Some r | _ -> None)
-      (fun r -> Circle r);
-    Codec.case "Box" Codec.(tuple2 float float)
-      (function Box (w, h) -> Some (w, h) | _ -> None)
-      (fun (w, h) -> Box (w, h));
-  ]
+[@@deriving codec]
 
 let () =
   List.iter (fun s ->
-    let txt = Json_stream.encode shape_repr s in
-    assert (parse_then_decode shape_repr txt = s)
+    let txt = Json_stream.encode shape_codec s in
+    assert (parse_then_decode shape_codec txt = s)
   ) [ Point; Circle 1.5; Box (3.0, 4.0) ];
   print_endline "PASS: streaming variants (constant + payload)"
 
@@ -229,7 +213,7 @@ let () =
    small records to a socket or file. *)
 let () =
   let buf = Buffer.create 1024 in
-  let repr = Codec.list user_repr in
+  let repr = Codec.list user_codec in
   let chunks = [
     [ { name = "Alice"; age = 30; email = None } ];
     [ { name = "Bob";   age = 22; email = Some "b@x" };
@@ -252,7 +236,7 @@ let () =
       email = if i mod 3 = 0 then None
               else Some (Printf.sprintf "u%d@example.com" i) })
   in
-  let users_repr = Codec.list user_repr in
+  let users_repr = Codec.list user_codec in
 
   (* Warm up to fault in pages and avoid first-run noise. *)
   let _ = Json_stream.encode users_repr users in

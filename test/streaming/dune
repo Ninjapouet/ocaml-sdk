@@ -1,6 +1,7 @@
 (executable
  (name test_streaming)
- (libraries codec codec-yojson yojson))
+ (libraries codec codec-yojson yojson)
+ (preprocess (pps ppx_codec)))
 
 (rule
  (alias runtest)
