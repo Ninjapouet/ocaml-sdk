@@ -171,41 +171,55 @@ let parse_then_decode repr s =
 type user = { name : string; age : int; email : string option }
 [@@deriving codec]
 
-let () =
+let%expect_test "streaming record" =
   let u = { name = "Alice"; age = 30; email = Some "alice@example.com" } in
   let s = Json_stream.encode user_codec u in
+  print_endline s;
   assert (parse_then_decode user_codec s = u);
-  print_endline "PASS: streaming record round-trips via Yojson decode"
+  [%expect {| {"name":"Alice","age":30,"email":"alice@example.com"} |}]
 
-let () =
-  let repr = Codec.(list (tuple3 int string (option bool))) in
+let%expect_test "streaming tuples, options, lists" =
+  let codec = Codec.(list (tuple3 int string (option bool))) in
   let v = [ 1, "a", Some true; 2, "bee", None; 3, "see", Some false ] in
-  let s = Json_stream.encode repr v in
-  assert (parse_then_decode repr s = v);
-  print_endline "PASS: streaming tuples, options, lists"
+  let s = Json_stream.encode codec v in
+  print_endline s;
+  assert (parse_then_decode codec s = v);
+  [%expect {| [[1,"a",true],[2,"bee",null],[3,"see",false]] |}]
 
 type shape = Point | Circle of float | Box of float * float
 [@@deriving codec]
 
-let () =
-  List.iter (fun s ->
-    let txt = Json_stream.encode shape_codec s in
-    assert (parse_then_decode shape_codec txt = s)
-  ) [ Point; Circle 1.5; Box (3.0, 4.0) ];
-  print_endline "PASS: streaming variants (constant + payload)"
+let%expect_test "streaming variant: Point (constant)" =
+  let s = Json_stream.encode shape_codec Point in
+  print_endline s;
+  assert (parse_then_decode shape_codec s = Point);
+  [%expect {| "Point" |}]
 
-let () =
-  let s = "line1\nline2\t\"quoted\"\\backslash\b\r\012" in
-  let txt = Json_stream.encode Codec.string s in
-  assert (parse_then_decode Codec.string txt = s);
-  print_endline "PASS: streaming escapes JSON special characters"
+let%expect_test "streaming variant: Circle (payload)" =
+  let s = Json_stream.encode shape_codec (Circle 1.5) in
+  print_endline s;
+  assert (parse_then_decode shape_codec s = Circle 1.5);
+  [%expect {| ["Circle",1.5] |}]
+
+let%expect_test "streaming variant: Box (tuple payload)" =
+  let s = Json_stream.encode shape_codec (Box (3.0, 4.0)) in
+  print_endline s;
+  assert (parse_then_decode shape_codec s = Box (3.0, 4.0));
+  [%expect {| ["Box",[3.0,4.0]] |}]
+
+let%expect_test "streaming escapes JSON special characters" =
+  let raw = "line1\nline2\t\"quoted\"\\backslash\b\r\012" in
+  let s = Json_stream.encode Codec.string raw in
+  print_endline s;
+  assert (parse_then_decode Codec.string s = raw);
+  [%expect {| "line1\nline2\t\"quoted\"\\backslash\b\r\f" |}]
 
 (* The lower-level [encode_to_buffer] lets the caller reuse an existing
    buffer across many values — useful when streaming a large feed of
    small records to a socket or file. *)
-let () =
+let%expect_test "encode_to_buffer reuses a caller-owned buffer" =
   let buf = Buffer.create 1024 in
-  let repr = Codec.list user_codec in
+  let codec = Codec.list user_codec in
   let chunks = [
     [ { name = "Alice"; age = 30; email = None } ];
     [ { name = "Bob";   age = 22; email = Some "b@x" };
@@ -213,14 +227,22 @@ let () =
   ] in
   List.iter (fun us ->
     Buffer.clear buf;
-    Json_stream.encode_to_buffer buf repr us;
-    assert (parse_then_decode repr (Buffer.contents buf) = us)
+    Json_stream.encode_to_buffer buf codec us;
+    let s = Buffer.contents buf in
+    print_endline s;
+    assert (parse_then_decode codec s = us)
   ) chunks;
-  print_endline "PASS: encode_to_buffer reuses a caller-owned buffer"
+  [%expect {|
+    [{"name":"Alice","age":30,"email":null}]
+    [{"name":"Bob","age":22,"email":"b@x"},{"name":"Carol","age":40,"email":null}]
+    |}]
 
 (* -- Allocation comparison on a large dataset --------------------------- *)
 
-let () =
+(* Wrapped in [let%test_unit] so it runs under [dune runtest] but its
+   non-deterministic stdout (timing, MiB) isn't matched by an expect
+   block. Cluster D will move this to a dedicated [bench/] target. *)
+let%test_unit "streaming driver allocates less than Yojson driver" =
   let n = 50_000 in
   let users = List.init n (fun i ->
     { name  = Printf.sprintf "user_%d" i;
@@ -259,14 +281,8 @@ let () =
       | Error e -> failwith (Codec.Error.to_string e))
   in
 
-  (* Both outputs must denote the same value. *)
   assert (parse_then_decode users_codec s_stream = users);
   assert (parse_then_decode users_codec s_yojson = users);
-
-  (* The streaming driver should allocate strictly less: it skips the
-     entire intermediate JSON AST (one [`Assoc] cell per record, one
-     [`String]/[`Int] node per field, one [`List] for the whole array). *)
   assert (alloc_stream < alloc_yojson);
   Printf.printf "  ratio (stream / yojson) : %.2f\n"
-    (alloc_stream /. alloc_yojson);
-  print_endline "PASS: streaming driver allocates less than Yojson driver"
+    (alloc_stream /. alloc_yojson)
