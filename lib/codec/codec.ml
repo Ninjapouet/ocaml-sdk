@@ -44,17 +44,22 @@ type _ t =
   | Char : char t
   | String : string t
   | Option : 'a t -> 'a option t
-  | List : 'a t -> 'a list t
-  | Array : 'a t -> 'a array t
   | Tuple2 : 'a t * 'b t -> ('a * 'b) t
   | Tuple3 : 'a t * 'b t * 'c t -> ('a * 'b * 'c) t
   | Tuple4 : 'a t * 'b t * 'c t * 'd t -> ('a * 'b * 'c * 'd) t
   | Tuple5 : 'a t * 'b t * 'c t * 'd t * 'e t -> ('a * 'b * 'c * 'd * 'e) t
   | Tuple6 : 'a t * 'b t * 'c t * 'd t * 'e t * 'f t -> ('a * 'b * 'c * 'd * 'e * 'f) t
+  | Collection : ('container, 'elem) collection_desc -> 'container t
   | Record : ('r, 'r) fields -> 'r t
   | Variant : 'v variant_desc -> 'v t
   | Map : ('a, 'b) map_desc -> 'b t
   | Lazy : 'a t lazy_t -> 'a t
+
+and ('container, 'elem) collection_desc = {
+  iter : ('elem -> unit) -> 'container -> unit;
+  builder : unit -> ('elem -> unit) * (unit -> 'container);
+  element_codec : 'elem t;
+}
 
 and (_, _) fields =
   | F0 : { record_name : string; constructor : 'f } -> ('f, 'r) fields
@@ -90,7 +95,7 @@ and ('a, 'b) map_desc = {
   backward : 'b -> 'a;
 }
 
-(* -- Convenience constructors --------------------------------------------- *)
+(* -- Primitives ----------------------------------------------------------- *)
 
 let unit = Unit
 let bool = Bool
@@ -102,8 +107,6 @@ let char = Char
 let string = String
 
 let option r = Option r
-let list r = List r
-let array r = Array r
 
 let tuple2 a b = Tuple2 (a, b)
 let tuple3 a b c = Tuple3 (a, b, c)
@@ -113,6 +116,103 @@ let tuple6 a b c d e f = Tuple6 (a, b, c, d, e, f)
 
 let map forward backward repr = Map { repr; forward; backward }
 let lazy_ l = Lazy l
+
+(* -- Collection combinators ----------------------------------------------- *)
+
+let collection ~iter ~builder element_codec =
+  Collection { iter; builder; element_codec }
+
+let list elem =
+  Collection {
+    iter = List.iter;
+    builder = (fun () ->
+      let acc = ref [] in
+      ((fun x -> acc := x :: !acc),
+       (fun () -> List.rev !acc)));
+    element_codec = elem;
+  }
+
+let array elem =
+  Collection {
+    iter = Array.iter;
+    builder = (fun () ->
+      let acc = ref [] in
+      ((fun x -> acc := x :: !acc),
+       (fun () -> Array.of_list (List.rev !acc))));
+    element_codec = elem;
+  }
+
+let seq elem =
+  Collection {
+    iter = Seq.iter;
+    builder = (fun () ->
+      let acc = ref [] in
+      ((fun x -> acc := x :: !acc),
+       (fun () -> List.to_seq (List.rev !acc))));
+    element_codec = elem;
+  }
+
+let queue elem =
+  Collection {
+    iter = Queue.iter;
+    builder = (fun () ->
+      let q = Queue.create () in
+      ((fun x -> Queue.add x q),
+       (fun () -> q)));
+    element_codec = elem;
+  }
+
+let hashtbl key value =
+  Collection {
+    iter = (fun f h -> Hashtbl.iter (fun k v -> f (k, v)) h);
+    builder = (fun () ->
+      let h = Hashtbl.create 16 in
+      ((fun (k, v) -> Hashtbl.add h k v),
+       (fun () -> h)));
+    element_codec = Tuple2 (key, value);
+  }
+
+(* -- Functorial wrappers for Map.Make / Set.Make -------------------------- *)
+
+module type MAP = sig
+  type key
+  type +!'a t
+  val empty : 'a t
+  val add : key -> 'a -> 'a t -> 'a t
+  val iter : (key -> 'a -> unit) -> 'a t -> unit
+end
+
+module type SET = sig
+  type elt
+  type t
+  val empty : t
+  val add : elt -> t -> t
+  val iter : (elt -> unit) -> t -> unit
+end
+
+module Make_map_codec (M : MAP) = struct
+  let codec key_codec value_codec =
+    Collection {
+      iter = (fun f m -> M.iter (fun k v -> f (k, v)) m);
+      builder = (fun () ->
+        let acc = ref M.empty in
+        ((fun (k, v) -> acc := M.add k v !acc),
+         (fun () -> !acc)));
+      element_codec = Tuple2 (key_codec, value_codec);
+    }
+end
+
+module Make_set_codec (S : SET) = struct
+  let codec elt_codec =
+    Collection {
+      iter = S.iter;
+      builder = (fun () ->
+        let acc = ref S.empty in
+        ((fun x -> acc := S.add x !acc),
+         (fun () -> !acc)));
+      element_codec = elt_codec;
+    }
+end
 
 (* -- Record builder ------------------------------------------------------- *)
 

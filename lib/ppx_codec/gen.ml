@@ -123,6 +123,14 @@ let rec codec_of_core_type ~loc ~rec_names ct =
     apply ~loc (codec_lid ~loc "list") [ codec_of_core_type ~loc ~rec_names arg ]
   | Ptyp_constr ({ txt = Lident "array"; _ }, [ arg ]) ->
     apply ~loc (codec_lid ~loc "array") [ codec_of_core_type ~loc ~rec_names arg ]
+  | Ptyp_constr ({ txt = Ldot (Lident "Seq", "t"); _ }, [ arg ]) ->
+    apply ~loc (codec_lid ~loc "seq") [ codec_of_core_type ~loc ~rec_names arg ]
+  | Ptyp_constr ({ txt = Ldot (Lident "Queue", "t"); _ }, [ arg ]) ->
+    apply ~loc (codec_lid ~loc "queue") [ codec_of_core_type ~loc ~rec_names arg ]
+  | Ptyp_constr ({ txt = Ldot (Lident "Hashtbl", "t"); _ }, [ k; v ]) ->
+    apply ~loc (codec_lid ~loc "hashtbl")
+      [ codec_of_core_type ~loc ~rec_names k;
+        codec_of_core_type ~loc ~rec_names v ]
   | Ptyp_constr ({ txt; _ }, args) ->
     let base_name = match txt with
       | Lident name -> codec_name name

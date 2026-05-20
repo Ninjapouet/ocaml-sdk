@@ -58,20 +58,12 @@ end = struct
       (match value with
        | None   -> Buffer.add_string buf "null"
        | Some v -> encode_to_buffer buf r v)
-    | Codec.List r ->
+    | Codec.Collection { iter; element_codec; _ } ->
       Buffer.add_char buf '[';
       let first = ref true in
-      List.iter (fun x ->
+      iter (fun x ->
         if !first then first := false else Buffer.add_char buf ',';
-        encode_to_buffer buf r x) value;
-      Buffer.add_char buf ']'
-    | Codec.Array r ->
-      Buffer.add_char buf '[';
-      let n = Array.length value in
-      for i = 0 to n - 1 do
-        if i > 0 then Buffer.add_char buf ',';
-        encode_to_buffer buf r (Array.unsafe_get value i)
-      done;
+        encode_to_buffer buf element_codec x) value;
       Buffer.add_char buf ']'
     | Codec.Tuple2 (r1, r2) ->
       let a, b = value in

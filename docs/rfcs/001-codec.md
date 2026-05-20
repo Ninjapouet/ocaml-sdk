@@ -778,6 +778,129 @@ to reuse an existing library or define our own:
 - Yet another type representation in the ecosystem
 - Must prove correctness and performance ourselves
 
+## Amendment 1: `Collection` Constructor (2026-05-20)
+
+### Context
+
+The first cut of the GADT had `List` and `Array` as dedicated constructors:
+
+```ocaml
+| List  : 'a t -> 'a list  t
+| Array : 'a t -> 'a array t
+```
+
+Anything else — `Hashtbl.t`, `Queue.t`, `Set.Make(_).t`, `Seq.t`, or a
+user's custom container — had to go through
+`Codec.map of_list to_list (Codec.list elem)`. This forces materializing
+an intermediate `'a list` on every encode and decode, which negates the
+"zero copy" promise of the GADT-driven architecture as soon as the
+type system leaves the strict `list`/`array` happy path. It also
+breaks down completely from the ppx's perspective: a type like
+`(string, user) Hashtbl.t` produces an "unbound value Hashtbl.t_codec"
+compile error, because the ppx has no built-in support and the stdlib
+provides no codec.
+
+### Decision
+
+Replace `List` and `Array` with a single `Collection` constructor that
+captures the abstract notion of an ordered, homogeneous container:
+
+```ocaml
+| Collection : ('container, 'elem) collection_desc -> 'container t
+
+and ('container, 'elem) collection_desc = {
+  iter : ('elem -> unit) -> 'container -> unit;
+  builder : unit -> ('elem -> unit) * (unit -> 'container);
+  element_codec : 'elem t;
+}
+```
+
+`iter` drives the encode side (push-style: every element of the
+container is fed to the callback once). `builder ()` returns a fresh
+`(sink, finalize)` pair used during decode: the driver feeds each
+decoded element into `sink` (in the same order the encoder wrote them),
+then calls `finalize ()` to obtain the reconstructed container.
+
+`Codec.list`, `Codec.array`, `Codec.seq`, `Codec.queue`, `Codec.hashtbl`
+become value-level combinators that build `Collection` instances. For
+functor outputs (`Map.Make(K)`, `Set.Make(K)`) the library ships
+`Codec.Make_map_codec` and `Codec.Make_set_codec` functors. Users with
+exotic containers reach for the low-level `Codec.collection
+~iter ~builder element_codec`.
+
+### Why this is principled, not "yet another special case"
+
+`Collection` does not encode a particular user's pet type. It captures
+the algebraic notion of "homogeneous ordered finite collection," which
+properly subsumes both `list` and `array`. After the change the GADT
+has *fewer* constructors than before (16 instead of 17), each driver
+handles *one* collection case instead of two, and the set of supported
+containers is open-ended without further constructor additions.
+
+The criterion for adding to the GADT becomes:
+
+> A new constructor is justified only if it captures a structural
+> notion that subsumes existing primitives or unlocks a whole category
+> of types. A new constructor is *not* justified if it's a workaround
+> for one particular type — that goes through `Codec.map`.
+
+`Collection` passes this test (unlocks any foldable+buildable
+container). `Datetime`, `Bigint`, `Email`, etc. don't (they're
+business-domain types and route through `Codec.map`).
+
+### Decoding cost for `Codec.list`
+
+Building a `list` from a stream of elements in insertion order using
+only safe stdlib operations costs `2N` cons-cell allocations: we
+accumulate with `acc := x :: !acc` and `List.rev` at finalize. CPS or
+difference-list encodings don't save anything (they allocate closures
+instead of cells, same asymptotic cost). The only way to descend to
+`N` allocations is the unsafe-internal tail-append trick using
+`Obj.set_field` on cons cells — a future optimization encapsulated
+inside `Codec.list`, invisible at the API boundary. For now we keep
+the safe variant.
+
+For containers with native in-place mutation (`Hashtbl`, `Queue`,
+`Stack`, `Buffer`, …) the builder is trivially `N` allocations in one
+pass, no trick required.
+
+### PPX coverage
+
+The ppx already routes built-in `list` and `array` through their
+combinators — no change there. Three new whitelist entries cover the
+common stdlib containers:
+
+```ocaml
+| Hashtbl.t  -> Codec.hashtbl <k_codec> <v_codec>
+| Queue.t    -> Codec.queue   <elem_codec>
+| Seq.t      -> Codec.seq     <elem_codec>
+```
+
+For `Map.Make`/`Set.Make`, the ppx cannot reconstruct the functor
+application syntactically. The user provides a `Module.t_codec`
+written once (typically using `Codec.Make_map_codec` or
+`Codec.Make_set_codec`), and the ppx finds it by the existing
+`{Module}.{name}_codec` convention.
+
+### Driver impact
+
+Each driver replaces its `List` and `Array` cases by a single
+`Collection { iter; builder; element_codec }` case. The Yojson driver
+loses ~10 lines and gains uniformity; the streaming driver in
+`test/streaming/` does the same.
+
+### Status
+
+Implemented and tested:
+- `lib/codec/codec.{ml,mli}`: `Collection` constructor + combinators.
+- `lib/codec_yojson/codec_yojson.ml`: single `Collection` case.
+- `lib/ppx_codec/gen.ml`: whitelist entries for `Hashtbl`, `Queue`,
+  `Seq`.
+- `test/ppx_codec/test_ppx_codec.ml`: round-trip tests for `Hashtbl`,
+  `Queue`, `Seq`, and `Map.Make`.
+- `test/streaming/test_streaming.ml`: streaming driver updated, alloc
+  ratio (streaming / Yojson) ≈ 0.24 on 50k records, unchanged.
+
 ## Open Questions
 
 1. **Naming**: Should the library be called `codec`, `encoding`, `serial`, or

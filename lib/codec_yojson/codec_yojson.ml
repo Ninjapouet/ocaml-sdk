@@ -27,10 +27,8 @@ let rec encode : type a. a Codec.t -> a -> (Yojson.Safe.t, Codec.error) result =
     (match value with
      | None -> Ok `Null
      | Some v -> encode repr v)
-  | Codec.List repr ->
-    encode_list repr value 0 []
-  | Codec.Array repr ->
-    encode_list repr (Array.to_list value) 0 []
+  | Codec.Collection { iter; element_codec; _ } ->
+    encode_collection iter element_codec value
   | Codec.Tuple2 (r1, r2) ->
     let a, b = value in
     let* ja = encode r1 a in
@@ -75,13 +73,21 @@ let rec encode : type a. a Codec.t -> a -> (Yojson.Safe.t, Codec.error) result =
   | Codec.Lazy l ->
     encode (Lazy.force l) value
 
-and encode_list : type a. a Codec.t -> a list -> int -> Yojson.Safe.t list -> (Yojson.Safe.t, Codec.error) result =
-  fun repr l i acc ->
-  match l with
-  | [] -> Ok (`List (List.rev acc))
-  | x :: xs ->
-    let* j = with_path (string_of_int i) (encode repr x) in
-    encode_list repr xs (i + 1) (j :: acc)
+and encode_collection :
+  type c e. ((e -> unit) -> c -> unit) -> e Codec.t -> c ->
+  (Yojson.Safe.t, Codec.error) result =
+  fun iter element_codec container ->
+  let exception Bail of Codec.error in
+  try
+    let items = ref [] in
+    let i = ref 0 in
+    iter (fun elem ->
+      match with_path (string_of_int !i) (encode element_codec elem) with
+      | Ok j -> items := j :: !items; incr i
+      | Error err -> raise (Bail err)
+    ) container;
+    Ok (`List (List.rev !items))
+  with Bail e -> Error e
 
 and encode_record : type f r. (f, r) Codec.fields -> r -> (string * Yojson.Safe.t) list -> (Yojson.Safe.t, Codec.error) result =
   fun fields value acc ->
@@ -147,13 +153,9 @@ let rec decode : type a. a Codec.t -> Yojson.Safe.t -> (a, Codec.error) result =
     (match json with
      | `Null -> Ok None
      | j -> let+ v = decode repr j in Some v)
-  | Codec.List repr ->
+  | Codec.Collection { builder; element_codec; _ } ->
     (match json with
-     | `List l -> decode_list repr l 0 []
-     | j -> type_error "list" j)
-  | Codec.Array repr ->
-    (match json with
-     | `List l -> let+ l = decode_list repr l 0 [] in Array.of_list l
+     | `List l -> decode_collection builder element_codec l
      | j -> type_error "list" j)
   | Codec.Tuple2 (r1, r2) ->
     (match json with
@@ -211,13 +213,20 @@ let rec decode : type a. a Codec.t -> Yojson.Safe.t -> (a, Codec.error) result =
   | Codec.Lazy l ->
     decode (Lazy.force l) json
 
-and decode_list : type a. a Codec.t -> Yojson.Safe.t list -> int -> a list -> (a list, Codec.error) result =
-  fun repr l i acc ->
-  match l with
-  | [] -> Ok (List.rev acc)
-  | j :: js ->
-    let* v = with_path (string_of_int i) (decode repr j) in
-    decode_list repr js (i + 1) (v :: acc)
+and decode_collection :
+  type c e. (unit -> (e -> unit) * (unit -> c)) -> e Codec.t ->
+  Yojson.Safe.t list -> (c, Codec.error) result =
+  fun builder element_codec items ->
+  let sink, finalize = builder () in
+  let exception Bail of Codec.error in
+  try
+    List.iteri (fun i j ->
+      match with_path (string_of_int i) (decode element_codec j) with
+      | Ok v -> sink v
+      | Error err -> raise (Bail err)
+    ) items;
+    Ok (finalize ())
+  with Bail e -> Error e
 
 and decode_record : type f r. (f, r) Codec.fields -> (string * Yojson.Safe.t) list -> (f, Codec.error) result =
   fun fields assoc ->

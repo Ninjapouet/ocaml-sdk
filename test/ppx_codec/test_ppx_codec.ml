@@ -135,6 +135,70 @@ let () =
   assert (roundtrip renamed_codec r = Ok r);
   print_endline "PASS: attribute [@name]"
 
+(* -- Stdlib container types ---------------------------------------------- *)
+
+type counters = (string, int) Hashtbl.t [@@deriving codec]
+
+let () =
+  let h = Hashtbl.create 4 in
+  Hashtbl.add h "a" 1;
+  Hashtbl.add h "b" 2;
+  match roundtrip counters_codec h with
+  | Ok h' ->
+    assert (Hashtbl.find h' "a" = 1);
+    assert (Hashtbl.find h' "b" = 2);
+    print_endline "PASS: Hashtbl.t via ppx"
+  | Error e -> failwith (Codec.Error.to_string e)
+
+type job_queue = string Queue.t [@@deriving codec]
+
+let () =
+  let q = Queue.create () in
+  Queue.add "first" q;
+  Queue.add "second" q;
+  match roundtrip job_queue_codec q with
+  | Ok q' ->
+    assert (Queue.pop q' = "first");
+    assert (Queue.pop q' = "second");
+    print_endline "PASS: Queue.t via ppx"
+  | Error e -> failwith (Codec.Error.to_string e)
+
+type lazy_stream = int Seq.t [@@deriving codec]
+
+let () =
+  let s = List.to_seq [ 1; 2; 3 ] in
+  match roundtrip lazy_stream_codec s with
+  | Ok s' ->
+    assert (List.of_seq s' = [ 1; 2; 3 ]);
+    print_endline "PASS: Seq.t via ppx"
+  | Error e -> failwith (Codec.Error.to_string e)
+
+(* Map.Make / Set.Make wrappers — the ppx finds [Smap.t_codec] via the
+   convention [Module.t_codec], so we expose it on a wrapping module. *)
+
+module Smap = struct
+  include Map.Make (String)
+  module C = Codec.Make_map_codec (struct
+    type nonrec key = key
+    type nonrec 'a t = 'a t
+    let empty = empty
+    let add = add
+    let iter = iter
+  end)
+  let t_codec value_codec = C.codec Codec.string value_codec
+end
+
+type tally = int Smap.t [@@deriving codec]
+
+let () =
+  let m = Smap.empty |> Smap.add "x" 1 |> Smap.add "y" 2 in
+  match roundtrip tally_codec m with
+  | Ok m' ->
+    assert (Smap.find "x" m' = 1);
+    assert (Smap.find "y" m' = 2);
+    print_endline "PASS: Map.Make via Codec.Make_map_codec + ppx"
+  | Error e -> failwith (Codec.Error.to_string e)
+
 (* -- Done ----------------------------------------------------------------- *)
 
 let () = print_endline "All PPX tests passed."

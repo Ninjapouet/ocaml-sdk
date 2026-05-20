@@ -40,6 +40,12 @@
     {- {{!section:variants} Variants} are described by listing
        {{!type:case} cases}, each carrying a destructor (for encoding)
        and a constructor (for decoding).}
+    {- {{!section:collections} Collections} (List, Array, Hashtbl,
+       Set.Make, …) are all described by a single [Collection]
+       constructor that exposes [iter] and a streaming [builder] —
+       drivers walk the container in place during encoding and feed
+       elements into the builder during decoding, with no list
+       intermediate.}
     {- {{!section:driver} Drivers} implement {!module-type:DRIVER} by
        recursively matching on the GADT. The type indices guarantee that
        when a driver matches e.g. [Int], the value is statically known
@@ -94,7 +100,8 @@ type error = Error.t
     pattern-match on the constructors to inspect the structure but cannot
     build values directly. Construction goes through the functions in
     {{!section:prims} Primitives}, {{!section:combinators} Combinators},
-    {{!section:records} Records}, and {{!section:variants} Variants}. *)
+    {{!section:collections} Collections}, {{!section:records} Records},
+    and {{!section:variants} Variants}. *)
 
 type _ t = private
   | Unit : unit t
@@ -106,14 +113,14 @@ type _ t = private
   | Char : char t
   | String : string t
   | Option : 'a t -> 'a option t
-  | List : 'a t -> 'a list t
-  | Array : 'a t -> 'a array t
   | Tuple2 : 'a t * 'b t -> ('a * 'b) t
   | Tuple3 : 'a t * 'b t * 'c t -> ('a * 'b * 'c) t
   | Tuple4 : 'a t * 'b t * 'c t * 'd t -> ('a * 'b * 'c * 'd) t
   | Tuple5 : 'a t * 'b t * 'c t * 'd t * 'e t -> ('a * 'b * 'c * 'd * 'e) t
   | Tuple6 : 'a t * 'b t * 'c t * 'd t * 'e t * 'f t
       -> ('a * 'b * 'c * 'd * 'e * 'f) t
+  | Collection : ('container, 'elem) collection_desc -> 'container t
+      (** See {{!section:collections} Collections}. *)
   | Record : ('r, 'r) fields -> 'r t
       (** See {{!section:records} Records}. *)
   | Variant : 'v variant_desc -> 'v t
@@ -122,6 +129,36 @@ type _ t = private
       (** See {!val:map}. *)
   | Lazy : 'a t lazy_t -> 'a t
       (** See {!val:lazy_}. *)
+
+(** {2:collection_payload Collection description}
+
+    A value of type [('container, 'elem) collection_desc] describes a
+    homogeneous, ordered collection [‘container] of elements of type
+    [‘elem]. It exposes two traversal primitives — one for encoding
+    ([iter]), one for decoding ([builder]) — and the type representation
+    of the elements.
+
+    {ul
+    {- {b Encoding.} The driver calls [iter f container]; [f] is invoked
+       on each element in turn, and the driver encodes each as
+       [element_codec] dictates. No intermediate list is materialized.}
+    {- {b Decoding.} The driver calls [builder ()] to obtain a fresh
+       pair [(sink, finalize)]. It feeds each decoded element into
+       [sink], then calls [finalize ()] to obtain the reconstructed
+       container.}}
+
+    This design is uniform: [list], [array], [Hashtbl.t], [Queue.t],
+    [Set.Make(_).t], … are all instances. *)
+and ('container, 'elem) collection_desc = private {
+  iter : ('elem -> unit) -> 'container -> unit;
+      (** Push-style traversal used during encoding. *)
+  builder : unit -> ('elem -> unit) * (unit -> 'container);
+      (** Fresh accumulator factory used during decoding. Returns a
+          [(sink, finalize)] pair: [sink] receives each decoded element
+          in order, [finalize ()] produces the final container. *)
+  element_codec : 'elem t;
+      (** Type representation of each element. *)
+}
 
 (** {2:record_fields Record fields}
 
@@ -221,13 +258,6 @@ val string : string t
     (e.g. JSON). *)
 val option : 'a t -> 'a option t
 
-(** [list r] represents ['a list]. Drivers encode each element with [r].
-    Error paths include the element index (e.g. ["2: type mismatch"]). *)
-val list : 'a t -> 'a list t
-
-(** [array r] represents ['a array]. Same encoding as {!val:list}. *)
-val array : 'a t -> 'a array t
-
 (** {2 Tuples} *)
 
 val tuple2 : 'a t -> 'b t -> ('a * 'b) t
@@ -279,6 +309,107 @@ val map : ('a -> 'b) -> ('b -> 'a) -> 'a t -> 'b t
       let tree_repr = Codec.lazy_ tree_repr
     ]} *)
 val lazy_ : 'a t lazy_t -> 'a t
+
+(** {1:collections Collections}
+
+    Homogeneous ordered containers are all described by a single
+    {!constructor:Collection} constructor (see
+    {!type:collection_desc}). [list], [array], [Hashtbl.t], [Queue.t],
+    [Set.Make(K).t], [Map.Make(K).t], [Seq.t], … are all instances.
+
+    A driver matches [Collection { iter; builder; element_codec }] once
+    and dispatches to the right behavior via the two callbacks.
+    Encoding never materializes an intermediate list; decoding streams
+    elements into the builder. *)
+
+(** [list r] represents ['a list]. *)
+val list : 'a t -> 'a list t
+
+(** [array r] represents ['a array]. *)
+val array : 'a t -> 'a array t
+
+(** [seq r] represents ['a Seq.t]. Note that an encoded [Seq.t] is
+    forced (consumed) by the driver; decoding produces a fresh
+    finite [Seq.t]. *)
+val seq : 'a t -> 'a Seq.t t
+
+(** [queue r] represents ['a Queue.t]. Iteration order is FIFO, which
+    is preserved across encode/decode. *)
+val queue : 'a t -> 'a Queue.t t
+
+(** [hashtbl k v] represents [('k, 'v) Hashtbl.t] as a sequence of
+    [(key, value)] pairs. Iteration order is unspecified (Hashtbl
+    doesn't guarantee order), so roundtripping a Hashtbl is preserved
+    only up to multiset equality. *)
+val hashtbl : 'k t -> 'v t -> ('k, 'v) Hashtbl.t t
+
+(** [collection ~iter ~builder element_codec] is the low-level escape
+    hatch for describing a custom container. Users typically reach for
+    {!val:list}, {!val:array}, {!val:hashtbl}, …; this is here for
+    third-party container types.
+
+    @param iter        Push-style traversal of the container. Must
+      yield every element exactly once.
+    @param builder     [builder ()] returns a fresh [(sink, finalize)]
+      pair. The driver feeds decoded elements into [sink] (in the
+      same order the encoder wrote them) then calls [finalize ()].
+    @param element_codec  Type representation of each element. *)
+val collection :
+  iter:(('elem -> unit) -> 'container -> unit) ->
+  builder:(unit -> ('elem -> unit) * (unit -> 'container)) ->
+  'elem t ->
+  'container t
+
+(** {2 Functorial wrappers for [Set.Make] / [Map.Make]} *)
+
+(** Minimal subset of [Map.Make]'s output signature needed to build a
+    codec. Real instances of [Map.Make(K)] satisfy this. *)
+module type MAP = sig
+  type key
+  type +!'a t
+  val empty : 'a t
+  val add : key -> 'a -> 'a t -> 'a t
+  val iter : (key -> 'a -> unit) -> 'a t -> unit
+end
+
+(** Minimal subset of [Set.Make]'s output signature needed to build a
+    codec. Real instances of [Set.Make(K)] satisfy this. *)
+module type SET = sig
+  type elt
+  type t
+  val empty : t
+  val add : elt -> t -> t
+  val iter : (elt -> unit) -> t -> unit
+end
+
+(** [Make_map_codec(M)] provides a codec for the abstract map type
+    [M.t]. The user supplies the codecs for [M.key] and the value
+    type at the call site.
+
+    {[
+      module Smap = Map.Make(String)
+      module Smap_codec = Codec.Make_map_codec(Smap)
+
+      let counts : int Smap.t Codec.t =
+        Smap_codec.codec Codec.string Codec.int
+    ]} *)
+module Make_map_codec (M : MAP) : sig
+  val codec : M.key codec -> 'a codec -> 'a M.t codec
+end
+
+(** [Make_set_codec(S)] provides a codec for the abstract set type
+    [S.t]. The user supplies the codec for [S.elt] at the call site.
+
+    {[
+      module Sset = Set.Make(String)
+      module Sset_codec = Codec.Make_set_codec(Sset)
+
+      let names : Sset.t Codec.t =
+        Sset_codec.codec Codec.string
+    ]} *)
+module Make_set_codec (S : SET) : sig
+  val codec : S.elt codec -> S.t codec
+end
 
 (** {1:records Records}
 
