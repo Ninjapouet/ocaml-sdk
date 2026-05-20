@@ -349,7 +349,7 @@ end)
 let%test_module "Records" = (module struct
   type user = { name : string; age : int }
 
-  let user_repr =
+  let user_codec =
     Codec.record "user" (fun name age -> { name; age })
     |> Codec.field "name" Codec.string (fun u -> u.name)
     |> Codec.field "age" Codec.int (fun u -> u.age)
@@ -364,34 +364,34 @@ let%test_module "Records" = (module struct
        | Error _ -> false)
 
   let%test "user roundtrip" =
-    roundtrip user_repr { name = "Alice"; age = 30 }
+    roundtrip user_codec { name = "Alice"; age = 30 }
 
   let%expect_test "user to JSON" =
-    let json = encode_exn user_repr { name = "Alice"; age = 30 } in
+    let json = encode_exn user_codec { name = "Alice"; age = 30 } in
     print_endline (Yojson.Safe.pretty_to_string json);
     [%expect {| { "name": "Alice", "age": 30 } |}]
 
   let%expect_test "user from JSON string" =
-    (match decode_string user_repr {|{"name":"Bob","age":25}|} with
+    (match decode_string user_codec {|{"name":"Bob","age":25}|} with
      | Ok u -> Printf.printf "%s, %d" u.name u.age
      | Error e -> print_string (Codec.Error.to_string e));
     [%expect {| Bob, 25 |}]
 
   let%expect_test "missing field error" =
-    (match decode user_repr (`Assoc [ "name", `String "Alice" ]) with
+    (match decode user_codec (`Assoc [ "name", `String "Alice" ]) with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| age: missing required field (expected field 'age') |}]
 
   let%expect_test "wrong type error" =
-    (match decode user_repr (`Int 42) with
+    (match decode user_codec (`Int 42) with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| type mismatch (expected object, got int) |}]
 
   type config = { host : string; port : int; debug : bool }
 
-  let config_repr =
+  let config_codec =
     Codec.record "config" (fun host port debug -> { host; port; debug })
     |> Codec.field "host" Codec.string (fun c -> c.host)
     |> Codec.field ~default:8080 "port" Codec.int (fun c -> c.port)
@@ -399,33 +399,33 @@ let%test_module "Records" = (module struct
     |> Codec.seal
 
   let%test "config all present" =
-    roundtrip config_repr { host = "localhost"; port = 3000; debug = true }
+    roundtrip config_codec { host = "localhost"; port = 3000; debug = true }
 
   let%test "config defaults" =
-    match decode config_repr (`Assoc [ "host", `String "localhost" ]) with
+    match decode config_codec (`Assoc [ "host", `String "localhost" ]) with
     | Ok c -> c.host = "localhost" && c.port = 8080 && c.debug = false
     | Error _ -> false
 
   type with_opt = { label : string; value : int option }
 
-  let with_opt_repr =
+  let with_opt_codec =
     Codec.record "with_opt" (fun label value -> { label; value })
     |> Codec.field "label" Codec.string (fun w -> w.label)
     |> Codec.field_opt "value" Codec.int (fun w -> w.value)
     |> Codec.seal
 
-  let%test "field_opt Some" = roundtrip with_opt_repr { label = "a"; value = Some 1 }
-  let%test "field_opt None" = roundtrip with_opt_repr { label = "b"; value = None }
+  let%test "field_opt Some" = roundtrip with_opt_codec { label = "a"; value = Some 1 }
+  let%test "field_opt None" = roundtrip with_opt_codec { label = "b"; value = None }
 
   let%test "field_opt missing" =
-    decode with_opt_repr (`Assoc [ "label", `String "c" ])
+    decode with_opt_codec (`Assoc [ "label", `String "c" ])
     = Ok { label = "c"; value = None }
 end)
 
 let%test_module "Variants" = (module struct
   type color = Red | Green | Blue
 
-  let color_repr =
+  let color_codec =
     Codec.variant "color" [
       Codec.case0 "Red" Red;
       Codec.case0 "Green" Green;
@@ -440,12 +440,12 @@ let%test_module "Variants" = (module struct
        | Ok v' -> v = v'
        | Error _ -> false)
 
-  let%test "constant variant Red" = roundtrip color_repr Red
-  let%test "constant variant Green" = roundtrip color_repr Green
-  let%test "constant variant Blue" = roundtrip color_repr Blue
+  let%test "constant variant Red" = roundtrip color_codec Red
+  let%test "constant variant Green" = roundtrip color_codec Green
+  let%test "constant variant Blue" = roundtrip color_codec Blue
 
   let%expect_test "constant variant JSON" =
-    print_endline (Yojson.Safe.to_string (encode_exn color_repr Green));
+    print_endline (Yojson.Safe.to_string (encode_exn color_codec Green));
     [%expect {| "Green" |}]
 
   type shape =
@@ -453,7 +453,7 @@ let%test_module "Variants" = (module struct
     | Rect of float * float
     | Point
 
-  let shape_repr =
+  let shape_codec =
     Codec.variant "shape" [
       Codec.case "Circle" Codec.float
         (function Circle r -> Some r | _ -> None)
@@ -464,16 +464,16 @@ let%test_module "Variants" = (module struct
       Codec.case0 "Point" Point;
     ]
 
-  let%test "Circle roundtrip" = roundtrip shape_repr (Circle 3.0)
-  let%test "Rect roundtrip" = roundtrip shape_repr (Rect (4.0, 5.0))
-  let%test "Point roundtrip" = roundtrip shape_repr Point
+  let%test "Circle roundtrip" = roundtrip shape_codec (Circle 3.0)
+  let%test "Rect roundtrip" = roundtrip shape_codec (Rect (4.0, 5.0))
+  let%test "Point roundtrip" = roundtrip shape_codec Point
 
   let%expect_test "Circle JSON" =
-    print_endline (Yojson.Safe.to_string (encode_exn shape_repr (Circle 3.0)));
+    print_endline (Yojson.Safe.to_string (encode_exn shape_codec (Circle 3.0)));
     [%expect {| ["Circle",3.0] |}]
 
   let%expect_test "unknown case error" =
-    (match decode color_repr (`String "Purple") with
+    (match decode color_codec (`String "Purple") with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected");
     [%expect {| color: unknown variant case 'Purple' |}]
@@ -481,25 +481,25 @@ let%test_module "Variants" = (module struct
   (* Recursive type *)
   type tree = Leaf | Node of tree * int * tree
 
-  let rec tree_repr =
+  let rec tree_codec =
     lazy (Codec.variant "tree" [
       Codec.case0 "Leaf" Leaf;
-      Codec.case "Node" Codec.(tuple3 (lazy_ tree_repr) int (lazy_ tree_repr))
+      Codec.case "Node" Codec.(tuple3 (lazy_ tree_codec) int (lazy_ tree_codec))
         (function Node (l, v, r) -> Some (l, v, r) | _ -> None)
         (fun (l, v, r) -> Node (l, v, r));
     ])
 
-  let tree_repr = Codec.lazy_ tree_repr
+  let tree_codec = Codec.lazy_ tree_codec
 
   let%test "recursive tree roundtrip" =
     let t = Node (Node (Leaf, 1, Leaf), 2, Node (Leaf, 3, Leaf)) in
-    roundtrip tree_repr t
+    roundtrip tree_codec t
 end)
 
 let%test_module "Map" = (module struct
   type email = Email of string
 
-  let email_repr =
+  let email_codec =
     Codec.map
       (fun s -> Email s)
       (fun (Email s) -> s)
@@ -507,15 +507,15 @@ let%test_module "Map" = (module struct
 
   let%test "map roundtrip" =
     let v = Email "test@example.com" in
-    match encode email_repr v with
+    match encode email_codec v with
     | Error _ -> false
     | Ok json ->
-      (match decode email_repr json with
+      (match decode email_codec json with
        | Ok (Email s) -> s = "test@example.com"
        | Error _ -> false)
 
   let%expect_test "map encodes as underlying" =
-    print_endline (Yojson.Safe.to_string (encode_exn email_repr (Email "a@b.c")));
+    print_endline (Yojson.Safe.to_string (encode_exn email_codec (Email "a@b.c")));
     [%expect {| "a@b.c" |}]
 end)
 
@@ -530,14 +530,14 @@ let%test_module "Nested" = (module struct
 
   type user = { name : string; age : int }
 
-  let user_repr =
+  let user_codec =
     Codec.record "user" (fun name age -> { name; age })
     |> Codec.field "name" Codec.string (fun u -> u.name)
     |> Codec.field "age" Codec.int (fun u -> u.age)
     |> Codec.seal
 
   let%test "list of records" =
-    roundtrip (Codec.list user_repr)
+    roundtrip (Codec.list user_codec)
       [ { name = "Alice"; age = 30 }; { name = "Bob"; age = 25 } ]
 
   let%test "nested option Some Some" =

@@ -228,11 +228,11 @@ let () =
       email = if i mod 3 = 0 then None
               else Some (Printf.sprintf "u%d@example.com" i) })
   in
-  let users_repr = Codec.list user_codec in
+  let users_codec = Codec.list user_codec in
 
   (* Warm up to fault in pages and avoid first-run noise. *)
-  let _ = Json_stream.encode users_repr users in
-  let _ = Codec_yojson.encode_string users_repr users in
+  let _ = Json_stream.encode users_codec users in
+  let _ = Codec_yojson.encode_string users_codec users in
 
   let measure label f =
     Gc.compact ();
@@ -250,18 +250,18 @@ let () =
   Printf.printf "Allocation comparison on %d records:\n" n;
   let s_stream, alloc_stream =
     measure "streaming driver" (fun () ->
-      Json_stream.encode users_repr users)
+      Json_stream.encode users_codec users)
   in
   let s_yojson, alloc_yojson =
     measure "Yojson driver" (fun () ->
-      match Codec_yojson.encode_string users_repr users with
+      match Codec_yojson.encode_string users_codec users with
       | Ok s    -> s
       | Error e -> failwith (Codec.Error.to_string e))
   in
 
   (* Both outputs must denote the same value. *)
-  assert (parse_then_decode users_repr s_stream = users);
-  assert (parse_then_decode users_repr s_yojson = users);
+  assert (parse_then_decode users_codec s_stream = users);
+  assert (parse_then_decode users_codec s_yojson = users);
 
   (* The streaming driver should allocate strictly less: it skips the
      entire intermediate JSON AST (one [`Assoc] cell per record, one

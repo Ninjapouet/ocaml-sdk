@@ -298,15 +298,15 @@ val map : ('a -> 'b) -> ('b -> 'a) -> 'a t -> 'b t
     {[
       type tree = Leaf | Node of tree * int * tree
 
-      let rec tree_repr : tree Codec.t Lazy.t =
+      let rec tree_codec : tree Codec.t Lazy.t =
         lazy (Codec.variant "tree" [
           Codec.case0 "Leaf" Leaf;
-          Codec.case "Node" Codec.(tuple3 (lazy_ tree_repr) int (lazy_ tree_repr))
+          Codec.case "Node" Codec.(tuple3 (lazy_ tree_codec) int (lazy_ tree_codec))
             (function Node (l, v, r) -> Some (l, v, r) | _ -> None)
             (fun (l, v, r) -> Node (l, v, r));
         ])
 
-      let tree_repr = Codec.lazy_ tree_repr
+      let tree_codec = Codec.lazy_ tree_codec
     ]} *)
 val lazy_ : 'a t lazy_t -> 'a t
 

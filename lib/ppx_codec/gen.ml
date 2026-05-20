@@ -293,7 +293,7 @@ let gen_case ~loc ~rec_names cd =
   | Pcstr_record lds ->
     (* Inline record: generate a record codec as the payload *)
     let field_names = List.map (fun ld -> ld.pld_name.txt) lds in
-    let record_repr = gen_record ~loc ~rec_names ~type_name:cd.pcd_name.txt lds in
+    let record_codec = gen_record ~loc ~rec_names ~type_name:cd.pcd_name.txt lds in
     let vars = List.map (fun name -> evar ~loc name) field_names in
     let var_pats = List.map (fun name -> pvar ~loc name) field_names in
     let record_pat =
@@ -319,7 +319,7 @@ let gen_case ~loc ~rec_names cd =
       pexp_fun ~loc Nolabel None (pvar ~loc "v") (evar ~loc "v")
     in
     apply ~loc (codec_lid ~loc "case")
-      [ estring ~loc cname; record_repr; destruct; construct ]
+      [ estring ~loc cname; record_codec; destruct; construct ]
 
 let gen_variant ~loc ~rec_names ~type_name cds =
   let open Ast_builder.Default in

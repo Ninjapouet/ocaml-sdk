@@ -13,32 +13,32 @@ type shape =
 
 (* -- Type representations -------------------------------------------------- *)
 
-let color_repr =
+let color_codec =
   Codec.variant "color"
     [ Codec.case0 "Red" Red
     ; Codec.case0 "Green" Green
     ; Codec.case0 "Blue" Blue
     ]
 
-let point_repr =
+let point_codec =
   Codec.record "point" (fun x y -> { x; y })
   |> Codec.field "x" Codec.float (fun p -> p.x)
   |> Codec.field "y" Codec.float (fun p -> p.y)
   |> Codec.seal
 
-let rec shape_repr =
+let rec shape_codec =
   lazy
     (Codec.variant "shape"
        [ Codec.case "Circle"
            (Codec.record "circle" (fun center radius -> Circle { center; radius })
-            |> Codec.field "center" point_repr (function Circle { center; _ } -> center | _ -> assert false)
+            |> Codec.field "center" point_codec (function Circle { center; _ } -> center | _ -> assert false)
             |> Codec.field "radius" Codec.float (function Circle { radius; _ } -> radius | _ -> assert false)
             |> Codec.seal)
            (function Circle { center; radius } -> Some (Circle { center; radius }) | _ -> None)
            Fun.id
        ; Codec.case "Rectangle"
            (Codec.record "rectangle" (fun origin width height -> Rectangle { origin; width; height })
-            |> Codec.field "origin" point_repr (function Rectangle { origin; _ } -> origin | _ -> assert false)
+            |> Codec.field "origin" point_codec (function Rectangle { origin; _ } -> origin | _ -> assert false)
             |> Codec.field "width" Codec.float (function Rectangle { width; _ } -> width | _ -> assert false)
             |> Codec.field "height" Codec.float (function Rectangle { height; _ } -> height | _ -> assert false)
             |> Codec.seal)
@@ -46,14 +46,14 @@ let rec shape_repr =
            Fun.id
        ; Codec.case "ColoredShape"
            (Codec.record "colored_shape" (fun shape color -> ColoredShape { shape; color })
-            |> Codec.field "shape" (Codec.lazy_ shape_repr) (function ColoredShape { shape; _ } -> shape | _ -> assert false)
-            |> Codec.field "color" color_repr (function ColoredShape { color; _ } -> color | _ -> assert false)
+            |> Codec.field "shape" (Codec.lazy_ shape_codec) (function ColoredShape { shape; _ } -> shape | _ -> assert false)
+            |> Codec.field "color" color_codec (function ColoredShape { color; _ } -> color | _ -> assert false)
             |> Codec.seal)
            (function ColoredShape r -> Some (ColoredShape r) | _ -> None)
            Fun.id
        ])
 
-let shape_repr = Codec.lazy_ shape_repr
+let shape_codec = Codec.lazy_ shape_codec
 
 (* -- Main ------------------------------------------------------------------ *)
 
@@ -67,20 +67,20 @@ let () =
         }
     ]
   in
-  let shapes_repr = Codec.list shape_repr in
+  let shapes_codec = Codec.list shape_codec in
 
   (* Encode to JSON — the driver traverses the value directly,
      guided by the GADT type description. No intermediate copy. *)
-  let json = Codec_yojson.encode_exn shapes_repr shapes in
+  let json = Codec_yojson.encode_exn shapes_codec shapes in
   let json_str = Yojson.Safe.pretty_to_string json in
   Printf.printf "Encoded JSON:\n%s\n\n" json_str;
 
   (* Decode back *)
-  let decoded = Codec_yojson.decode_exn shapes_repr json in
+  let decoded = Codec_yojson.decode_exn shapes_codec json in
   Printf.printf "Roundtrip OK: %b\n\n" (shapes = decoded);
 
   (* Demonstrate error handling *)
   let bad_json = Yojson.Safe.from_string {|{"x": "not a number", "y": 1.0}|} in
-  match Codec_yojson.decode point_repr bad_json with
+  match Codec_yojson.decode point_codec bad_json with
   | Ok _ -> Printf.printf "unexpected success\n"
   | Error e -> Printf.printf "Expected error: %s\n" (Codec.Error.to_string e)

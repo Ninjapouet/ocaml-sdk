@@ -7,14 +7,14 @@
     {[
       type user = { name : string; age : int }
 
-      let user_repr =
+      let user_codec =
         Codec.record "user" (fun name age -> { name; age })
         |> Codec.field "name" Codec.string (fun u -> u.name)
         |> Codec.field "age" Codec.int (fun u -> u.age)
         |> Codec.seal
 
-      let json = Codec_yojson.encode_exn user_repr { name = "Alice"; age = 30 }
-      let user = Codec_yojson.decode_exn user_repr json
+      let json = Codec_yojson.encode_exn user_codec { name = "Alice"; age = 30 }
+      let user = Codec_yojson.decode_exn user_codec json
     ]}
 *)
 
