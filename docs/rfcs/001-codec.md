@@ -984,7 +984,7 @@ end
 (* First-class record wrappers. *)
 type 'out encoder  = { encode : 'a. 'a codec -> 'a -> 'out -> (unit, error) result }
 type 'input decoder = { decode : 'a. 'a codec -> 'input -> ('a, error) result }
-type ('out, 'input) driver = { encoder : 'out encoder; decoder : 'input decoder }
+type ('input, 'output) driver = { encoder : 'output encoder; decoder : 'input decoder }
 
 module Bridge : sig
   val encoder : (module Writer.S with type out = 'o) -> 'o encoder
@@ -992,7 +992,7 @@ module Bridge : sig
   val driver :
     (module Writer.S with type out = 'o) ->
     (module Reader.S with type input = 'i) ->
-    ('o, 'i) driver
+    ('i, 'o) driver
 end
 ```
 
@@ -1015,7 +1015,7 @@ module Yojson_reader  : Codec.Reader.S with type input = Yojson.Safe.t
 val buffer_encoder  : Buffer.t   Codec.encoder
 val channel_encoder : out_channel Codec.encoder
 val yojson_decoder  : Yojson.Safe.t Codec.decoder
-val driver : (Buffer.t, Yojson.Safe.t) Codec.driver
+val driver : (Yojson.Safe.t, Buffer.t) Codec.driver
 
 val encode_string : 'a Codec.codec -> 'a -> (string, Codec.error) result
 val decode_string : 'a Codec.codec -> string -> ('a, Codec.error) result

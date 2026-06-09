@@ -70,7 +70,7 @@ val yojson_decoder  : Yojson.Safe.t Codec.decoder
 
 (** Pre-cut driver: streaming encode to [Buffer.t], decode from
     [Yojson.Safe.t]. *)
-val driver : (Buffer.t, Yojson.Safe.t) Codec.driver
+val driver : (Yojson.Safe.t, Buffer.t) Codec.driver
 
 (** {1 Top-level convenience: string ↔ value}
 

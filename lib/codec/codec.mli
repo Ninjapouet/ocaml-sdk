@@ -740,8 +740,11 @@ type 'input decoder = {
   decode : 'a. 'a codec -> 'input -> ('a, error) result;
 }
 
-type ('out, 'input) driver = {
-  encoder : 'out encoder;
+(** [('input, 'output) driver] pairs a decoder reading from ['input]
+    with an encoder writing to ['output]. The order is read as
+    "input → driver → output". *)
+type ('input, 'output) driver = {
+  encoder : 'output encoder;
   decoder : 'input decoder;
 }
 
@@ -793,7 +796,7 @@ module Bridge : sig
       the encoder + decoder pair into a record.
 
       {[
-        let json_driver : (Buffer.t, Yojson.Safe.t) Codec.driver =
+        let json_driver : (Yojson.Safe.t, Buffer.t) Codec.driver =
           Codec.Bridge.driver
             (module Codec_yojson.Buffer_writer)
             (module Codec_yojson.Yojson_reader)
@@ -805,7 +808,7 @@ module Bridge : sig
   val driver :
     (module Writer.S with type out = 'o) ->
     (module Reader.S with type input = 'i) ->
-    ('o, 'i) driver
+    ('i, 'o) driver
 end
 
 (** {2 Toplevel helpers}
@@ -826,5 +829,5 @@ end
     When you only have one half (an [encoder] or a [decoder] record),
     use the field access directly: [enc.encode codec v out]. *)
 
-val encode : ('o, _) driver -> 'a codec -> 'a -> 'o -> (unit, error) result
-val decode : (_, 'i) driver -> 'a codec -> 'i -> ('a, error) result
+val encode : (_, 'o) driver -> 'a codec -> 'a -> 'o -> (unit, error) result
+val decode : ('i, _) driver -> 'a codec -> 'i -> ('a, error) result

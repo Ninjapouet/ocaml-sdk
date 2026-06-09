@@ -645,8 +645,8 @@ type 'input decoder = {
   decode : 'a. 'a codec -> 'input -> ('a, error) result;
 }
 
-type ('out, 'input) driver = {
-  encoder : 'out encoder;
+type ('input, 'output) driver = {
+  encoder : 'output encoder;
   decoder : 'input decoder;
 }
 
@@ -663,7 +663,7 @@ module Bridge = struct
     (type o) (type i)
     (module W : Writer.S with type out = o)
     (module R : Reader.S with type input = i)
-    : (o, i) driver
+    : (i, o) driver
     =
     { encoder = encoder (module W);
       decoder = decoder (module R) }
@@ -671,8 +671,8 @@ end
 
 (* -- Toplevel encode/decode: apply a driver's appropriate half ----------- *)
 
-let encode (driver : ('o, _) driver) codec v (out : 'o) =
+let encode (driver : (_, 'o) driver) codec v (out : 'o) =
   driver.encoder.encode codec v out
 
-let decode (driver : (_, 'i) driver) codec (input : 'i) =
+let decode (driver : ('i, _) driver) codec (input : 'i) =
   driver.decoder.decode codec input

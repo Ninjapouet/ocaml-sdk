@@ -415,7 +415,7 @@ let yojson_decoder  : Yojson.Safe.t Codec.decoder = Codec.Bridge.decoder (module
 
 (** Pre-built driver: streaming encode to [Buffer.t], decode from
     [Yojson.Safe.t]. *)
-let driver : (Buffer.t, Yojson.Safe.t) Codec.driver =
+let driver : (Yojson.Safe.t, Buffer.t) Codec.driver =
   Codec.Bridge.driver (module Buffer_writer) (module Yojson_reader)
 
 (* -- Top-level convenience: encode/decode through a string --------------- *)
