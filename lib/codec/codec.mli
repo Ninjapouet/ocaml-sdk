@@ -807,3 +807,24 @@ module Bridge : sig
     (module Reader.S with type input = 'i) ->
     ('o, 'i) driver
 end
+
+(** {2 Toplevel helpers}
+
+    Apply a driver's encoder/decoder directly. Equivalent to
+    [driver.encoder.encode codec v out] / [driver.decoder.decode codec input]
+    but reads as "encode with this driver" — the most natural entry
+    point when you have a driver in hand.
+
+    {[
+      let buf = Buffer.create 256 in
+      Codec.encode Codec_yojson.driver my_codec my_value buf
+      |> Result.get_ok;
+      let s = Buffer.contents buf in
+      let v = Codec.decode Codec_yojson.driver my_codec (Yojson.Safe.from_string s)
+    ]}
+
+    When you only have one half (an [encoder] or a [decoder] record),
+    use the field access directly: [enc.encode codec v out]. *)
+
+val encode : ('o, _) driver -> 'a codec -> 'a -> 'o -> (unit, error) result
+val decode : (_, 'i) driver -> 'a codec -> 'i -> ('a, error) result

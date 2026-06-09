@@ -668,3 +668,11 @@ module Bridge = struct
     { encoder = encoder (module W);
       decoder = decoder (module R) }
 end
+
+(* -- Toplevel encode/decode: apply a driver's appropriate half ----------- *)
+
+let encode (driver : ('o, _) driver) codec v (out : 'o) =
+  driver.encoder.encode codec v out
+
+let decode (driver : (_, 'i) driver) codec (input : 'i) =
+  driver.decoder.decode codec input
