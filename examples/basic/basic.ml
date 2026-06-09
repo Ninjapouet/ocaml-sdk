@@ -71,16 +71,16 @@ let () =
 
   (* Encode to JSON — the driver traverses the value directly,
      guided by the GADT type description. No intermediate copy. *)
-  let json = Codec_yojson.encode_exn shapes_codec shapes in
+  let json = Codec_yojson.Raw.encode_exn shapes_codec shapes in
   let json_str = Yojson.Safe.pretty_to_string json in
   Printf.printf "Encoded JSON:\n%s\n\n" json_str;
 
   (* Decode back *)
-  let decoded = Codec_yojson.decode_exn shapes_codec json in
+  let decoded = Codec_yojson.Raw.decode_exn shapes_codec json in
   Printf.printf "Roundtrip OK: %b\n\n" (shapes = decoded);
 
   (* Demonstrate error handling *)
   let bad_json = Yojson.Safe.from_string {|{"x": "not a number", "y": 1.0}|} in
-  match Codec_yojson.decode point_codec bad_json with
+  match Codec_yojson.Raw.decode point_codec bad_json with
   | Ok _ -> Printf.printf "unexpected success\n"
   | Error e -> Printf.printf "Expected error: %s\n" (Codec.Error.to_string e)

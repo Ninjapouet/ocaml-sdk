@@ -86,6 +86,11 @@ module Error : sig
       locations. *)
   val with_path : string -> ('a, t) result -> ('a, t) result
 
+  (** [prepend_path prefix err] prepends [prefix] to [err]'s path.
+      The bare-error analogue of {!val:with_path}; useful inside
+      exception-based encoders/decoders. *)
+  val prepend_path : string -> t -> t
+
   (** Raised by the [_exn] convenience functions in drivers. *)
   exception Codec_error of t
 end
@@ -362,53 +367,83 @@ val collection :
 
 (** {2 Functorial wrappers for [Set.Make] / [Map.Make]} *)
 
-(** Minimal subset of [Map.Make]'s output signature needed to build a
-    codec. Real instances of [Map.Make(K)] satisfy this. *)
-module type MAP = sig
-  type key
-  type +!'a t
-  val empty : 'a t
-  val add : key -> 'a -> 'a t -> 'a t
-  val iter : (key -> 'a -> unit) -> 'a t -> unit
-end
-
-(** Minimal subset of [Set.Make]'s output signature needed to build a
-    codec. Real instances of [Set.Make(K)] satisfy this. *)
-module type SET = sig
-  type elt
-  type t
-  val empty : t
-  val add : elt -> t -> t
-  val iter : (elt -> unit) -> t -> unit
-end
-
-(** [Make_map_codec(M)] provides a codec for the abstract map type
-    [M.t]. The user supplies the codecs for [M.key] and the value
-    type at the call site.
+(** Codec construction for functorial map types ([Map.Make(K).t] and
+    look-alikes).
 
     {[
       module Smap = Map.Make(String)
-      module Smap_codec = Codec.Make_map_codec(Smap)
+      module Smap_codec = Codec.Map.Make(Smap)
 
       let counts : int Smap.t Codec.t =
         Smap_codec.codec Codec.string Codec.int
     ]} *)
-module Make_map_codec (M : MAP) : sig
-  val codec : M.key codec -> 'a codec -> 'a M.t codec
+module Map : sig
+  (** Minimal subset of [Map.Make]'s output signature needed to build a
+      codec. Real instances of [Map.Make(K)] satisfy this directly. *)
+  module type S = sig
+    type key
+    type +!'a t
+    val empty : 'a t
+    val add : key -> 'a -> 'a t -> 'a t
+    val iter : (key -> 'a -> unit) -> 'a t -> unit
+  end
+
+  (** [Make(M)] provides a codec for the abstract map type [M.t]. The
+      caller supplies the codecs for [M.key] and for the value type at
+      use site.
+
+      {[
+        module Smap = Map.Make (String)
+        module Smap_codec = Codec.Map.Make (Smap)
+
+        let counts : int Smap.t Codec.t =
+          Smap_codec.codec Codec.string Codec.int
+
+        (* Or, attached to [Smap] so the ppx picks it up via the
+           [Module.t_codec] convention: *)
+        module Smap_with_codec = struct
+          include Smap
+          let t_codec v = Smap_codec.codec Codec.string v
+        end
+      ]} *)
+  module Make (M : S) : sig
+    val codec : M.key codec -> 'a codec -> 'a M.t codec
+  end
 end
 
-(** [Make_set_codec(S)] provides a codec for the abstract set type
-    [S.t]. The user supplies the codec for [S.elt] at the call site.
+(** Codec construction for functorial set types ([Set.Make(K).t] and
+    look-alikes).
 
     {[
       module Sset = Set.Make(String)
-      module Sset_codec = Codec.Make_set_codec(Sset)
+      module Sset_codec = Codec.Set.Make(Sset)
 
       let names : Sset.t Codec.t =
         Sset_codec.codec Codec.string
     ]} *)
-module Make_set_codec (S : SET) : sig
-  val codec : S.elt codec -> S.t codec
+module Set : sig
+  (** Minimal subset of [Set.Make]'s output signature needed to build a
+      codec. Real instances of [Set.Make(K)] satisfy this directly. *)
+  module type S = sig
+    type elt
+    type t
+    val empty : t
+    val add : elt -> t -> t
+    val iter : (elt -> unit) -> t -> unit
+  end
+
+  (** [Make(S)] provides a codec for the abstract set type [S.t]. The
+      caller supplies the codec for [S.elt] at use site.
+
+      {[
+        module Sset = Set.Make (String)
+        module Sset_codec = Codec.Set.Make (Sset)
+
+        let names : Sset.t Codec.t = Sset_codec.codec Codec.string
+      ]} *)
+  module Make (S : S) : sig
+    val codec : S.elt codec -> S.t codec
+  end
 end
 
 (** {1:records Records}
@@ -517,60 +552,258 @@ val case0 : string -> 'v -> 'v case
       matching case wins. *)
 val variant : string -> 'v case list -> 'v t
 
-(** {1:driver Driver interface}
+(** {1:drivers Drivers}
 
     A driver converts between OCaml values and a target format by
-    pattern-matching on the {!type:t} GADT. The type indices guarantee
-    safety: matching [Int] means the value is [int], matching
-    [Record fields] gives access to typed getters, etc.
+    pattern-matching on the {!type:t} GADT. The framework is built
+    bottom-up in three layers:
 
-    {[
-      (* Sketch of a JSON driver's encode function *)
-      let rec encode : type a. a Codec.t -> a -> json = fun repr value ->
-        match repr with
-        | Codec.Int    -> Ok (`Int value)
-        | Codec.String -> Ok (`String value)
-        | Codec.Option r ->
-          (match value with
-           | None   -> Ok `Null
-           | Some v -> encode r v)
-        | Codec.Record fields -> encode_record fields value
-        | ...
-    ]} *)
+    {ul
+    {- {{!module:Writer}Writer} / {{!module:Reader}Reader}: format-primitive
+       interfaces. Each format (JSON, YAML, …) provides one writer per
+       output type ([Buffer.t], [out_channel], a custom AST builder, …)
+       and one reader per input type (parsed AST, raw bytes, …).}
+    {- {{!module:Encoder}Encoder} / {{!module:Decoder}Decoder}: driver
+       halves. Each holds a single [encode] / [decode] function. Produced
+       from a Writer / Reader by the [Make] functor.}
+    {- {{!module:Driver}Driver}: combined encode + decode. Produced from
+       a (Writer, Reader) pair by {!module:Driver.Make}.}}
 
-(** Minimal signature for a serialization driver. *)
-module type DRIVER = sig
+    Streaming (no intermediate AST) is one important use of this
+    framework — it falls out naturally when the [Writer] writes to a
+    sink rather than building a value. But nothing in the layers below
+    forces a streaming shape; a [Writer] is free to construct any value
+    of its [out] type, including a fully-materialized AST.
 
-  (** The target format (e.g. [Yojson.Safe.t], [Yaml.value], [bytes]). *)
-  type t
+    For first-class use without modules, value-level {!type:encoder} /
+    {!type:decoder} / {!type:driver} records are exposed alongside, and
+    the {!module:Bridge} sub-module converts first-class modules into
+    these records. *)
 
-  (** [encode repr value] serializes [value] to the target format,
-      guided by the type description [repr]. *)
-  val encode : 'a codec -> 'a -> (t, error) result
+(** Format-primitive interface for the encoding side. *)
+module Writer : sig
+  module type S = sig
+    (** The sink type — e.g. [Buffer.t], [out_channel]. *)
+    type out
 
-  (** [decode repr raw] deserializes a value of the target format,
-      guided by the type description [repr]. *)
-  val decode : 'a codec -> t -> ('a, error) result
+    val null   : out -> unit
+    val bool   : out -> bool -> unit
+    val int    : out -> int -> unit
+    val int32  : out -> int32 -> unit
+    val int64  : out -> int64 -> unit
+    val float  : out -> float -> unit
+    val char   : out -> char -> unit
+    val string : out -> string -> unit
+
+    val begin_array : out -> unit
+
+    (** Called before every array item except the first. *)
+    val array_sep   : out -> unit
+
+    val end_array   : out -> unit
+
+    val begin_object : out -> unit
+
+    (** [key out ~first name] writes the key for a field. [~first] is
+        [true] for the first field of an object (no leading separator). *)
+    val key : out -> first:bool -> string -> unit
+
+    val end_object : out -> unit
+
+    (** Encoding of a variant constant constructor (no payload). *)
+    val variant_constant : out -> string -> unit
+
+    (** [variant_payload out name write_payload] encodes a variant with a
+        payload. The writer is in control of the surrounding syntax (e.g.
+        JSON emits [\["Name", payload\]], a hypothetical YAML mapping
+        writer might emit [Name: payload]); it invokes [write_payload]
+        to delegate the payload encoding to the generic logic. *)
+    val variant_payload : out -> string -> (out -> unit) -> unit
+  end
 end
 
-(** Functor that extends a {!module-type:DRIVER} with convenience
-    functions.
+(** Format-primitive interface for the decoding side. *)
+module Reader : sig
+  module type S = sig
+    (** The source type — typically a parsed AST (e.g. [Yojson.Safe.t]). *)
+    type input
+
+    val null    : input -> (unit,   error) result
+    val bool    : input -> (bool,   error) result
+    val int     : input -> (int,    error) result
+    val int32   : input -> (int32,  error) result
+    val int64   : input -> (int64,  error) result
+    val float   : input -> (float,  error) result
+    val char    : input -> (char,   error) result
+    val string  : input -> (string, error) result
+    val array   : input -> (input list, error) result
+    val object_ : input -> ((string * input) list, error) result
+  end
+end
+
+(** Encoder half of a driver: one [encode] function that walks the GADT
+    and emits tokens to a sink. *)
+module Encoder : sig
+  module type S = sig
+    type out
+    val encode : 'a codec -> 'a -> out -> (unit, error) result
+  end
+
+  (** Build an encoder from a writer. The functor result is bound to
+      the writer's sink type.
+
+      {[
+        (* Plug a JSON writer (writes to Buffer.t) into the generic
+           streaming encoder. *)
+        module Json_buf = Codec.Encoder.Make (Codec_yojson.Buffer_writer)
+
+        let serialize codec value =
+          let buf = Buffer.create 256 in
+          match Json_buf.encode codec value buf with
+          | Ok () -> Ok (Buffer.contents buf)
+          | Error _ as e -> e
+      ]}
+
+      For first-class usage (passing an encoder as a value), see
+      {!module:Bridge}. *)
+  module Make (W : Writer.S) : S with type out = W.out
+end
+
+(** Decoder half of a driver: one [decode] function that traverses a
+    parsed input and reconstructs the OCaml value. *)
+module Decoder : sig
+  module type S = sig
+    type input
+    val decode : 'a codec -> input -> ('a, error) result
+  end
+
+  (** Build a decoder from a reader.
+
+      {[
+        module Yojson_dec = Codec.Decoder.Make (Codec_yojson.Yojson_reader)
+
+        let parse codec s =
+          match Yojson.Safe.from_string s with
+          | exception Yojson.Json_error msg ->
+            Error (Codec.Error.make [] msg ~expected:"valid JSON")
+          | ast -> Yojson_dec.decode codec ast
+      ]} *)
+  module Make (R : Reader.S) : S with type input = R.input
+end
+
+(** Combined driver: encode + decode. *)
+module Driver : sig
+  module type S = sig
+    type out
+    type input
+    include Encoder.S with type out := out
+    include Decoder.S with type input := input
+  end
+
+  (** Build a driver from a writer and a reader. The two halves keep
+      their own type parameter — [out] for the sink, [input] for the
+      source — so encoding and decoding don't have to share a type.
+
+      {[
+        (* JSON streaming driver: encode to a Buffer, decode from a
+           Yojson AST. *)
+        module Json = Codec.Driver.Make
+          (Codec_yojson.Buffer_writer)
+          (Codec_yojson.Yojson_reader)
+
+        let encode_to_string codec v =
+          let buf = Buffer.create 256 in
+          let+ () = Json.encode codec v buf in
+          Buffer.contents buf
+
+        let decode_string codec s =
+          Json.decode codec (Yojson.Safe.from_string s)
+      ]} *)
+  module Make (W : Writer.S) (R : Reader.S) : S
+    with type out = W.out
+     and type input = R.input
+end
+
+(** {2:records First-class records}
+
+    Value-level wrappers around the module hierarchy. Users who want to
+    pass encoders/decoders/drivers as ordinary values (compose, store
+    in records, swap at runtime) use these. Library authors define a
+    {!module:Writer.S} or {!module:Reader.S}, then publish a pre-built
+    record via {!module:Bridge}. *)
+
+type 'out encoder = {
+  encode : 'a. 'a codec -> 'a -> 'out -> (unit, error) result;
+}
+
+type 'input decoder = {
+  decode : 'a. 'a codec -> 'input -> ('a, error) result;
+}
+
+type ('out, 'input) driver = {
+  encoder : 'out encoder;
+  decoder : 'input decoder;
+}
+
+(** Convert first-class modules implementing {!module:Writer.S} /
+    {!module:Reader.S} into the corresponding records. Library authors
+    typically expose a writer or reader as a module, then publish a
+    pre-bridged record at the top of their module:
 
     {[
-      module My_driver = Codec.Make (struct
-        type t = ...
-        let encode = ...
-        let decode = ...
-      end)
+      (* Inside codec-yojson: *)
 
-      let v = My_driver.decode_exn repr raw
-    ]} *)
-module Make (D : DRIVER) : sig
-  include DRIVER with type t = D.t
+      module Buffer_writer : Codec.Writer.S with type out = Buffer.t = struct
+        type out = Buffer.t
+        let null buf = Buffer.add_string buf "null"
+        ... (* full JSON syntax *)
+      end
 
-  (** Like {!val:encode} but raises {!Error.Codec_error} on failure. *)
-  val encode_exn : 'a codec -> 'a -> t
+      let buffer_encoder : Buffer.t Codec.encoder =
+        Codec.Bridge.encoder (module Buffer_writer)
+    ]}
 
-  (** Like {!val:decode} but raises {!Error.Codec_error} on failure. *)
-  val decode_exn : 'a codec -> t -> 'a
+    Users then write [Codec_yojson.buffer_encoder.encode codec v buf]
+    without ever touching a functor. *)
+module Bridge : sig
+  (** [encoder (module W)] runs {!Encoder.Make} on [W] and projects the
+      resulting encoder into a record.
+
+      {[
+        let json_buf : Buffer.t Codec.encoder =
+          Codec.Bridge.encoder (module Codec_yojson.Buffer_writer)
+
+        let buf = Buffer.create 256 in
+        let _ = json_buf.encode my_codec my_value buf
+      ]} *)
+  val encoder : (module Writer.S with type out = 'o) -> 'o encoder
+
+  (** [decoder (module R)] runs {!Decoder.Make} on [R] and projects the
+      resulting decoder into a record.
+
+      {[
+        let yojson_dec : Yojson.Safe.t Codec.decoder =
+          Codec.Bridge.decoder (module Codec_yojson.Yojson_reader)
+
+        let value = yojson_dec.decode my_codec (Yojson.Safe.from_string s)
+      ]} *)
+  val decoder : (module Reader.S with type input = 'i) -> 'i decoder
+
+  (** [driver (module W) (module R)] runs {!Driver.Make} and projects
+      the encoder + decoder pair into a record.
+
+      {[
+        let json_driver : (Buffer.t, Yojson.Safe.t) Codec.driver =
+          Codec.Bridge.driver
+            (module Codec_yojson.Buffer_writer)
+            (module Codec_yojson.Yojson_reader)
+
+        let buf = Buffer.create 256 in
+        let _ = json_driver.encoder.encode my_codec my_value buf in
+        let v = json_driver.decoder.decode my_codec parsed_input
+      ]} *)
+  val driver :
+    (module Writer.S with type out = 'o) ->
+    (module Reader.S with type input = 'i) ->
+    ('o, 'i) driver
 end

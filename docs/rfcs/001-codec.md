@@ -824,7 +824,7 @@ then calls `finalize ()` to obtain the reconstructed container.
 `Codec.list`, `Codec.array`, `Codec.seq`, `Codec.queue`, `Codec.hashtbl`
 become value-level combinators that build `Collection` instances. For
 functor outputs (`Map.Make(K)`, `Set.Make(K)`) the library ships
-`Codec.Make_map_codec` and `Codec.Make_set_codec` functors. Users with
+`Codec.Map.Make` and `Codec.Set.Make` functors. Users with
 exotic containers reach for the low-level `Codec.collection
 ~iter ~builder element_codec`.
 
@@ -878,8 +878,8 @@ common stdlib containers:
 
 For `Map.Make`/`Set.Make`, the ppx cannot reconstruct the functor
 application syntactically. The user provides a `Module.t_codec`
-written once (typically using `Codec.Make_map_codec` or
-`Codec.Make_set_codec`), and the ppx finds it by the existing
+written once (typically using `Codec.Map.Make` or
+`Codec.Set.Make`), and the ppx finds it by the existing
 `{Module}.{name}_codec` convention.
 
 ### Driver impact
@@ -900,6 +900,224 @@ Implemented and tested:
   `Queue`, `Seq`, and `Map.Make`.
 - `test/streaming/test_streaming.ml`: streaming driver updated, alloc
   ratio (streaming / Yojson) ≈ 0.24 on 50k records, unchanged.
+
+## Amendment 2: Driver framework via Writer / Reader / Encoder / Decoder / Driver
+
+### Context
+
+The first cut shipped streaming as an inline `Json_stream` module
+inside `test/streaming/`, with all the JSON syntax hard-coded against
+a `Buffer.t`. Three concerns surfaced in the PR #7 review:
+
+1. **No reuse.** Every user wanting fast JSON serialization had to
+   re-implement the same Buffer-based encoder.
+2. **Target locked.** The sink type was baked in at compile time. A
+   user wanting to stream JSON directly to an `out_channel` or a
+   custom transport had no clean entry point.
+3. **Decoder lived nowhere.** The streaming module had only `encode`;
+   `decode` was on `Codec_yojson` and pinned to `Yojson.Safe.t`.
+
+The shape the PR called for: a *complete* driver (encode + decode),
+*parametric* over the streaming target, with the generic plumbing
+living in `codec` (the core lib) so the format-specific code stays
+focused on the format primitives.
+
+### Decision
+
+Three-layer driver framework in `codec`, with first-class record
+wrappers for ergonomic use. The layers are format-agnostic; streaming
+is one important use case but not a requirement of the layers
+themselves.
+
+```ocaml
+(* In Codec — declared bottom-up. *)
+
+(* Layer 1: format-primitive interfaces. *)
+module Writer : sig module type S = sig
+  type out
+  val null : out -> unit
+  val bool / int / int32 / int64 / float / char / string : out -> _ -> unit
+  val begin_array / array_sep / end_array : out -> unit
+  val begin_object / end_object : out -> unit
+  val key : out -> first:bool -> string -> unit
+  val variant_constant : out -> string -> unit
+  val variant_payload  : out -> string -> (out -> unit) -> unit
+end end
+
+module Reader : sig module type S = sig
+  type input
+  val null / bool / int / int32 / int64 / float / char / string
+    : input -> _ result
+  val array   : input -> (input list, error) result
+  val object_ : input -> ((string * input) list, error) result
+end end
+
+(* Layer 2: driver halves, produced from Writer/Reader. *)
+module Encoder : sig
+  module type S = sig
+    type out
+    val encode : 'a codec -> 'a -> out -> (unit, error) result
+  end
+  module Make (W : Writer.S) : S with type out = W.out
+end
+
+module Decoder : sig
+  module type S = sig
+    type input
+    val decode : 'a codec -> input -> ('a, error) result
+  end
+  module Make (R : Reader.S) : S with type input = R.input
+end
+
+(* Layer 3: combined driver. *)
+module Driver : sig
+  module type S = sig
+    type out
+    type input
+    include Encoder.S with type out := out
+    include Decoder.S with type input := input
+  end
+  module Make (W : Writer.S) (R : Reader.S) : S
+    with type out = W.out and type input = R.input
+end
+
+(* First-class record wrappers. *)
+type 'out encoder  = { encode : 'a. 'a codec -> 'a -> 'out -> (unit, error) result }
+type 'input decoder = { decode : 'a. 'a codec -> 'input -> ('a, error) result }
+type ('out, 'input) driver = { encoder : 'out encoder; decoder : 'input decoder }
+
+module Bridge : sig
+  val encoder : (module Writer.S with type out = 'o) -> 'o encoder
+  val decoder : (module Reader.S with type input = 'i) -> 'i decoder
+  val driver :
+    (module Writer.S with type out = 'o) ->
+    (module Reader.S with type input = 'i) ->
+    ('o, 'i) driver
+end
+```
+
+```ocaml
+(* In Codec_yojson: *)
+
+module Raw : sig
+  val encode     : 'a Codec.codec -> 'a -> (Yojson.Safe.t, Codec.error) result
+  val decode     : 'a Codec.codec -> Yojson.Safe.t -> ('a, Codec.error) result
+  val encode_exn : 'a Codec.codec -> 'a -> Yojson.Safe.t
+  val decode_exn : 'a Codec.codec -> Yojson.Safe.t -> 'a
+end
+(* AST-based; not a Codec.Driver.S. *)
+
+module Buffer_writer  : Codec.Writer.S with type out = Buffer.t
+module Channel_writer : Codec.Writer.S with type out = out_channel
+module Yojson_reader  : Codec.Reader.S with type input = Yojson.Safe.t
+
+(* Pre-built records: 95 % of users only need these. *)
+val buffer_encoder  : Buffer.t   Codec.encoder
+val channel_encoder : out_channel Codec.encoder
+val yojson_decoder  : Yojson.Safe.t Codec.decoder
+val driver : (Buffer.t, Yojson.Safe.t) Codec.driver
+
+val encode_string : 'a Codec.codec -> 'a -> (string, Codec.error) result
+val decode_string : 'a Codec.codec -> string -> ('a, Codec.error) result
+```
+
+The composition sketched as `A → B → C` (OCaml type → Yojson AST →
+stream target) takes two forms:
+
+- **Materialized**: `A → B` via `Codec_yojson.Raw.encode` (produces a
+  `Yojson.Safe.t`); `B → C` via `Yojson.Safe.to_string` /
+  `to_channel` (which yojson already ships).
+- **Streaming** (`A → C` directly, no B):
+
+```ocaml
+let buf = Buffer.create 256 in
+Codec_yojson.buffer_encoder.encode my_codec my_value buf;
+print_endline (Buffer.contents buf)
+```
+
+The stream target is selected by which `Writer.S` is plugged in. Same
+codec, same value, multiple targets — no AST is ever materialized.
+
+### Three layers of API for three audiences
+
+1. **Casual user**: uses the pre-built records `buffer_encoder` /
+   `yojson_decoder` / `driver` directly. No functor instantiation, no
+   first-class modules, one line of code per call.
+2. **Driver author**: writes a `module W : Writer.S = struct ... end`
+   for a new format, then exposes a record via
+   `Codec.Bridge.encoder (module W)`. One glue line.
+3. **Power user**: instantiates `Codec.Encoder.Make (W)` directly,
+   manipulates the module-level interfaces.
+
+The three coexist without interfering, each consumes the level above
+without polluting it.
+
+### Where the framework lives
+
+`Writer.S` / `Reader.S` / `Encoder.Make` / `Decoder.Make` /
+`Driver.Make` / record types / `Bridge` all live in the **core**
+`codec` library. They depend on nothing format-specific — they're pure
+GADT-traversal logic.
+
+The format-specific code (JSON token syntax, yojson AST extractors)
+lives in `codec-yojson`, which depends on the core plus `yojson`.
+Future format packages (YAML, TOML, …) follow the same pattern:
+implement `WRITER` and `READER` for the format, depend on their
+parser of choice.
+
+### Asymmetric path-tracking
+
+`Decoder.Make` wraps every field read and every collection-item read
+with `Error.with_path` to produce paths like
+`outer.inner.field.3` on decode errors — these errors are common in
+practice (missing fields, type mismatches in user-supplied JSON).
+
+`Encoder.Make` does **not** wrap on the hot path. The only encoder
+error is "no matching variant case", which is a programming bug and
+carries the variant's name in its error. Wrapping every field and
+collection item with `with_path` would allocate a closure per call,
+costing ~50% extra allocation on benchmark data for a feature that
+fires almost never. The asymmetry is intentional.
+
+### Why `kind` is not exposed in `Reader.S`
+
+A candidate design exposed a `kind : input -> [ \`Null | \`Bool | … ]`
+discriminator, the intent being to avoid allocating discarded `Error`
+values during `Option` / `Variant` decoding. Two factors made the
+gain illusory:
+
+1. **Minor-heap allocation is cheap.** The discarded `Error` lives in
+   the OCaml nursery for at most one minor GC; the cost compared to
+   a branch on an integer is nanoseconds.
+2. **The format-tag discrimination already exists.** A reader that
+   pattern-matches on its AST (Yojson does) already gets the tag for
+   free; the `Error` allocation is the only added cost, and it's tiny.
+
+Keeping `READER` minimal (10 functions, all typed extractors) avoided
+exposing a leak of the underlying parser's tag set.
+
+### Status
+
+Implemented and tested:
+- `lib/codec/codec.{ml,mli}`: `Writer.S`, `Reader.S`, `Encoder.S +
+  Encoder.Make`, `Decoder.S + Decoder.Make`, `Driver.S + Driver.Make`,
+  record types `encoder`/`decoder`/`driver`, `Bridge` module. New
+  `Error.prepend_path` helper. Old `DRIVER` / `Make` / `WRITER` /
+  `Make_writer` / `READER` / `Make_reader` removed.
+- `lib/codec_yojson/codec_yojson.ml`: `Raw` is now a plain function
+  namespace (no `Codec.DRIVER` conformance). `Buffer_writer` /
+  `Channel_writer` / `Yojson_reader` modules implement the new
+  `Codec.Writer.S` / `Codec.Reader.S`. Pre-built records
+  `buffer_encoder` / `channel_encoder` / `yojson_decoder` / `driver`
+  expose the bridged values directly. Top-level `encode_string` /
+  `decode_string` route through `buffer_encoder` + `yojson_decoder`.
+- `test/streaming/test_streaming.ml`: tests use
+  `Codec_yojson.buffer_encoder.encode codec value buf` — no more
+  module instantiation in user-facing code. Benchmark on 50k records:
+  11.35 MiB allocated by the streaming path vs 49.75 MiB by Raw +
+  `Yojson.Safe.to_string` (ratio ≈ 0.23, unchanged).
+- All callers (examples, ppx test) migrated from `Codec_yojson.encode`
+  to `Codec_yojson.Raw.encode`.
 
 ## Open Questions
 

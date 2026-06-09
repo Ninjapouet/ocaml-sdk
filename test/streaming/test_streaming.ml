@@ -1,170 +1,23 @@
-(** Streaming, zero-AST driver test.
+(** Tests for the streaming framework via [Codec_yojson.buffer_encoder]
+    (the pre-built record built from [Buffer_writer]).
 
-    Demonstrates that the [Codec.t] GADT can drive serialization without
-    building any intermediate representation: the driver walks the OCaml
-    value, guided by the type description, and writes tokens directly
-    into a [Buffer.t]. Allocations are limited to the output buffer and
-    small primitive conversions (e.g. [string_of_int]); no
-    [`Assoc]/[`List] AST nodes, no field-name lists, no intermediate
-    tuples. *)
+    Demonstrates that the generic streaming encoder writes JSON directly
+    into a [Buffer.t] with no intermediate AST, and compares its
+    allocation footprint against [Codec_yojson.Raw.encode +
+    Yojson.Safe.to_string]. *)
 
-(* -- Streaming JSON driver ------------------------------------------------ *)
+(** Encode via the pre-built record encoder, return the resulting string. *)
+let encode_to_string codec value =
+  let buf = Buffer.create 256 in
+  match Codec_yojson.buffer_encoder.encode codec value buf with
+  | Ok () -> Buffer.contents buf
+  | Error e -> raise (Codec.Error.Codec_error e)
 
-module Json_stream : sig
-  val encode_to_buffer : Buffer.t -> 'a Codec.t -> 'a -> unit
-  val encode : 'a Codec.t -> 'a -> string
-end = struct
-
-  let add_escaped_string buf s =
-    Buffer.add_char buf '"';
-    for i = 0 to String.length s - 1 do
-      match String.unsafe_get s i with
-      | '"'    -> Buffer.add_string buf "\\\""
-      | '\\'   -> Buffer.add_string buf "\\\\"
-      | '\n'   -> Buffer.add_string buf "\\n"
-      | '\r'   -> Buffer.add_string buf "\\r"
-      | '\t'   -> Buffer.add_string buf "\\t"
-      | '\b'   -> Buffer.add_string buf "\\b"
-      | '\012' -> Buffer.add_string buf "\\f"
-      | c when Char.code c < 0x20 ->
-        Buffer.add_string buf (Printf.sprintf "\\u%04x" (Char.code c))
-      | c      -> Buffer.add_char buf c
-    done;
-    Buffer.add_char buf '"'
-
-  (* [Float.to_string 1.0] returns ["1."], which is not valid JSON;
-     append a trailing zero so the output parses back as a float. *)
-  let add_float buf f =
-    let s = Float.to_string f in
-    Buffer.add_string buf s;
-    let n = String.length s in
-    if n > 0 && s.[n - 1] = '.' then Buffer.add_char buf '0'
-
-  let rec encode_to_buffer : type a. Buffer.t -> a Codec.t -> a -> unit =
-    fun buf repr value ->
-    match repr with
-    | Codec.Unit   -> Buffer.add_string buf "null"
-    | Codec.Bool   -> Buffer.add_string buf (if value then "true" else "false")
-    | Codec.Int    -> Buffer.add_string buf (string_of_int value)
-    | Codec.Int32  -> Buffer.add_string buf (Int32.to_string value)
-    | Codec.Int64  -> Buffer.add_string buf (Int64.to_string value)
-    | Codec.Float  -> add_float buf value
-    | Codec.Char   ->
-      Buffer.add_char buf '"';
-      Buffer.add_char buf value;
-      Buffer.add_char buf '"'
-    | Codec.String -> add_escaped_string buf value
-    | Codec.Option r ->
-      (match value with
-       | None   -> Buffer.add_string buf "null"
-       | Some v -> encode_to_buffer buf r v)
-    | Codec.Collection { iter; element_codec; _ } ->
-      Buffer.add_char buf '[';
-      let first = ref true in
-      iter (fun x ->
-        if !first then first := false else Buffer.add_char buf ',';
-        encode_to_buffer buf element_codec x) value;
-      Buffer.add_char buf ']'
-    | Codec.Tuple2 (r1, r2) ->
-      let a, b = value in
-      Buffer.add_char buf '[';
-      encode_to_buffer buf r1 a; Buffer.add_char buf ',';
-      encode_to_buffer buf r2 b;
-      Buffer.add_char buf ']'
-    | Codec.Tuple3 (r1, r2, r3) ->
-      let a, b, c = value in
-      Buffer.add_char buf '[';
-      encode_to_buffer buf r1 a; Buffer.add_char buf ',';
-      encode_to_buffer buf r2 b; Buffer.add_char buf ',';
-      encode_to_buffer buf r3 c;
-      Buffer.add_char buf ']'
-    | Codec.Tuple4 (r1, r2, r3, r4) ->
-      let a, b, c, d = value in
-      Buffer.add_char buf '[';
-      encode_to_buffer buf r1 a; Buffer.add_char buf ',';
-      encode_to_buffer buf r2 b; Buffer.add_char buf ',';
-      encode_to_buffer buf r3 c; Buffer.add_char buf ',';
-      encode_to_buffer buf r4 d;
-      Buffer.add_char buf ']'
-    | Codec.Tuple5 (r1, r2, r3, r4, r5) ->
-      let a, b, c, d, e = value in
-      Buffer.add_char buf '[';
-      encode_to_buffer buf r1 a; Buffer.add_char buf ',';
-      encode_to_buffer buf r2 b; Buffer.add_char buf ',';
-      encode_to_buffer buf r3 c; Buffer.add_char buf ',';
-      encode_to_buffer buf r4 d; Buffer.add_char buf ',';
-      encode_to_buffer buf r5 e;
-      Buffer.add_char buf ']'
-    | Codec.Tuple6 (r1, r2, r3, r4, r5, r6) ->
-      let a, b, c, d, e, f = value in
-      Buffer.add_char buf '[';
-      encode_to_buffer buf r1 a; Buffer.add_char buf ',';
-      encode_to_buffer buf r2 b; Buffer.add_char buf ',';
-      encode_to_buffer buf r3 c; Buffer.add_char buf ',';
-      encode_to_buffer buf r4 d; Buffer.add_char buf ',';
-      encode_to_buffer buf r5 e; Buffer.add_char buf ',';
-      encode_to_buffer buf r6 f;
-      Buffer.add_char buf ']'
-    | Codec.Record fields ->
-      Buffer.add_char buf '{';
-      let _ : bool = encode_fields buf fields value true in
-      Buffer.add_char buf '}'
-    | Codec.Variant { cases; _ } ->
-      encode_variant buf cases value
-    | Codec.Map { repr; backward; _ } ->
-      encode_to_buffer buf repr (backward value)
-    | Codec.Lazy l ->
-      encode_to_buffer buf (Lazy.force l) value
-
-  (* Fields are stored outermost-last: recursing into [rest] before
-     writing this field gives the original declaration order. The
-     boolean threads through to know whether to emit a separator. *)
-  and encode_fields : type f r.
-    Buffer.t -> (f, r) Codec.fields -> r -> bool -> bool =
-    fun buf fields value first ->
-    match fields with
-    | Codec.F0 _ -> first
-    | Codec.Field { rest; name; repr; get; _ } ->
-      let first = encode_fields buf rest value first in
-      if not first then Buffer.add_char buf ',';
-      add_escaped_string buf name;
-      Buffer.add_char buf ':';
-      encode_to_buffer buf repr (get value);
-      false
-
-  and encode_variant : type v. Buffer.t -> v Codec.case list -> v -> unit =
-    fun buf cases value ->
-    let rec loop = function
-      | [] -> failwith "Json_stream: no matching variant case"
-      | Codec.Case { name; repr; destruct; _ } :: rest ->
-        (match destruct value with
-         | None   -> loop rest
-         | Some a ->
-           Buffer.add_char buf '[';
-           add_escaped_string buf name;
-           Buffer.add_char buf ',';
-           encode_to_buffer buf repr a;
-           Buffer.add_char buf ']')
-      | Codec.Case0 { name; match_; _ } :: rest ->
-        if match_ value then add_escaped_string buf name
-        else loop rest
-    in
-    loop cases
-
-  let encode repr v =
-    let buf = Buffer.create 256 in
-    encode_to_buffer buf repr v;
-    Buffer.contents buf
-end
-
-(* -- Helpers ------------------------------------------------------------- *)
-
-(* The streaming driver and Yojson may format floats differently and
-   emit object keys in a different order; comparing parsed output is the
-   format-independent correctness check. *)
-let parse_then_decode repr s =
+(** Decode via the [Raw] driver after parsing with Yojson — used in
+    correctness tests to verify that streaming output round-trips. *)
+let parse_then_decode codec s =
   let json = Yojson.Safe.from_string s in
-  Codec_yojson.decode_exn repr json
+  Codec_yojson.Raw.decode_exn codec json
 
 (* -- Correctness tests --------------------------------------------------- *)
 
@@ -173,7 +26,7 @@ type user = { name : string; age : int; email : string option }
 
 let%expect_test "streaming record" =
   let u = { name = "Alice"; age = 30; email = Some "alice@example.com" } in
-  let s = Json_stream.encode user_codec u in
+  let s = encode_to_string user_codec u in
   print_endline s;
   assert (parse_then_decode user_codec s = u);
   [%expect {| {"name":"Alice","age":30,"email":"alice@example.com"} |}]
@@ -181,7 +34,7 @@ let%expect_test "streaming record" =
 let%expect_test "streaming tuples, options, lists" =
   let codec = Codec.(list (tuple3 int string (option bool))) in
   let v = [ 1, "a", Some true; 2, "bee", None; 3, "see", Some false ] in
-  let s = Json_stream.encode codec v in
+  let s = encode_to_string codec v in
   print_endline s;
   assert (parse_then_decode codec s = v);
   [%expect {| [[1,"a",true],[2,"bee",null],[3,"see",false]] |}]
@@ -190,34 +43,34 @@ type shape = Point | Circle of float | Box of float * float
 [@@deriving codec]
 
 let%expect_test "streaming variant: Point (constant)" =
-  let s = Json_stream.encode shape_codec Point in
+  let s = encode_to_string shape_codec Point in
   print_endline s;
   assert (parse_then_decode shape_codec s = Point);
   [%expect {| "Point" |}]
 
 let%expect_test "streaming variant: Circle (payload)" =
-  let s = Json_stream.encode shape_codec (Circle 1.5) in
+  let s = encode_to_string shape_codec (Circle 1.5) in
   print_endline s;
   assert (parse_then_decode shape_codec s = Circle 1.5);
   [%expect {| ["Circle",1.5] |}]
 
 let%expect_test "streaming variant: Box (tuple payload)" =
-  let s = Json_stream.encode shape_codec (Box (3.0, 4.0)) in
+  let s = encode_to_string shape_codec (Box (3.0, 4.0)) in
   print_endline s;
   assert (parse_then_decode shape_codec s = Box (3.0, 4.0));
   [%expect {| ["Box",[3.0,4.0]] |}]
 
 let%expect_test "streaming escapes JSON special characters" =
   let raw = "line1\nline2\t\"quoted\"\\backslash\b\r\012" in
-  let s = Json_stream.encode Codec.string raw in
+  let s = encode_to_string Codec.string raw in
   print_endline s;
   assert (parse_then_decode Codec.string s = raw);
   [%expect {| "line1\nline2\t\"quoted\"\\backslash\b\r\f" |}]
 
-(* The lower-level [encode_to_buffer] lets the caller reuse an existing
-   buffer across many values — useful when streaming a large feed of
-   small records to a socket or file. *)
-let%expect_test "encode_to_buffer reuses a caller-owned buffer" =
+(* The streaming encoder accepts a caller-owned [Buffer.t] — useful when
+   feeding a large sequence of small records into a single buffer (HTTP
+   response body, log shipper, …) without reallocation between items. *)
+let%expect_test "Make_writer accepts a caller-owned buffer" =
   let buf = Buffer.create 1024 in
   let codec = Codec.list user_codec in
   let chunks = [
@@ -227,22 +80,25 @@ let%expect_test "encode_to_buffer reuses a caller-owned buffer" =
   ] in
   List.iter (fun us ->
     Buffer.clear buf;
-    Json_stream.encode_to_buffer buf codec us;
-    let s = Buffer.contents buf in
-    print_endline s;
-    assert (parse_then_decode codec s = us)
+    match Codec_yojson.buffer_encoder.encode codec us buf with
+    | Ok () ->
+      let s = Buffer.contents buf in
+      print_endline s;
+      assert (parse_then_decode codec s = us)
+    | Error e -> raise (Codec.Error.Codec_error e)
   ) chunks;
   [%expect {|
     [{"name":"Alice","age":30,"email":null}]
     [{"name":"Bob","age":22,"email":"b@x"},{"name":"Carol","age":40,"email":null}]
     |}]
 
-(* -- Allocation comparison on a large dataset --------------------------- *)
+(* -- Allocation comparison: streaming vs Yojson AST -----------------------
 
-(* Wrapped in [let%test_unit] so it runs under [dune runtest] but its
-   non-deterministic stdout (timing, MiB) isn't matched by an expect
-   block. Cluster D will move this to a dedicated [bench/] target. *)
-let%test_unit "streaming driver allocates less than Yojson driver" =
+   The streaming path writes directly into a [Buffer.t]; the AST path
+   builds a [Yojson.Safe.t] first then serializes it to a string. We
+   measure the difference on a 50k-record dataset. *)
+
+let%test_unit "streaming framework allocates less than Yojson AST" =
   let n = 50_000 in
   let users = List.init n (fun i ->
     { name  = Printf.sprintf "user_%d" i;
@@ -252,9 +108,11 @@ let%test_unit "streaming driver allocates less than Yojson driver" =
   in
   let users_codec = Codec.list user_codec in
 
-  (* Warm up to fault in pages and avoid first-run noise. *)
-  let _ = Json_stream.encode users_codec users in
-  let _ = Codec_yojson.encode_string users_codec users in
+  (* Warm up to fault in pages. *)
+  let _ = encode_to_string users_codec users in
+  let _ =
+    Yojson.Safe.to_string (Codec_yojson.Raw.encode_exn users_codec users)
+  in
 
   let measure label f =
     Gc.compact ();
@@ -271,18 +129,15 @@ let%test_unit "streaming driver allocates less than Yojson driver" =
 
   Printf.printf "Allocation comparison on %d records:\n" n;
   let s_stream, alloc_stream =
-    measure "streaming driver" (fun () ->
-      Json_stream.encode users_codec users)
+    measure "streaming framework" (fun () -> encode_to_string users_codec users)
   in
-  let s_yojson, alloc_yojson =
-    measure "Yojson driver" (fun () ->
-      match Codec_yojson.encode_string users_codec users with
-      | Ok s    -> s
-      | Error e -> failwith (Codec.Error.to_string e))
+  let s_ast, alloc_ast =
+    measure "Yojson AST + dump" (fun () ->
+      Yojson.Safe.to_string (Codec_yojson.Raw.encode_exn users_codec users))
   in
 
   assert (parse_then_decode users_codec s_stream = users);
-  assert (parse_then_decode users_codec s_yojson = users);
-  assert (alloc_stream < alloc_yojson);
-  Printf.printf "  ratio (stream / yojson) : %.2f\n"
-    (alloc_stream /. alloc_yojson)
+  assert (parse_then_decode users_codec s_ast = users);
+  assert (alloc_stream < alloc_ast);
+  Printf.printf "  ratio (stream / ast) : %.2f\n"
+    (alloc_stream /. alloc_ast)

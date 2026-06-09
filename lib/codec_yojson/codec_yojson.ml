@@ -2,7 +2,9 @@ open Result.Syntax
 
 let with_path = Codec.Error.with_path
 
-let type_error expected json =
+(* -- Yojson AST helpers --------------------------------------------------- *)
+
+let type_error expected (json : Yojson.Safe.t) =
   let got = match json with
     | `Null -> "null" | `Bool _ -> "bool" | `Int _ -> "int"
     | `Intlit _ -> "intlit" | `Float _ -> "float"
@@ -10,7 +12,7 @@ let type_error expected json =
   in
   Error (Codec.Error.make [] "type mismatch" ~expected ~got)
 
-(* -- Encode: traverse OCaml value guided by GADT, produce JSON ------------ *)
+(* -- Raw driver: encode/decode via Yojson.Safe.t -------------------------- *)
 
 let rec encode : type a. a Codec.t -> a -> (Yojson.Safe.t, Codec.error) result =
   fun repr value ->
@@ -89,7 +91,9 @@ and encode_collection :
     Ok (`List (List.rev !items))
   with Bail e -> Error e
 
-and encode_record : type f r. (f, r) Codec.fields -> r -> (string * Yojson.Safe.t) list -> (Yojson.Safe.t, Codec.error) result =
+and encode_record : type f r.
+  (f, r) Codec.fields -> r -> (string * Yojson.Safe.t) list ->
+  (Yojson.Safe.t, Codec.error) result =
   fun fields value acc ->
   match fields with
   | Codec.F0 _ -> Ok (`Assoc acc)
@@ -97,7 +101,8 @@ and encode_record : type f r. (f, r) Codec.fields -> r -> (string * Yojson.Safe.
     let* j = with_path name (encode repr (get value)) in
     encode_record rest value ((name, j) :: acc)
 
-and encode_variant : type v. string -> v Codec.case list -> v -> (Yojson.Safe.t, Codec.error) result =
+and encode_variant : type v.
+  string -> v Codec.case list -> v -> (Yojson.Safe.t, Codec.error) result =
   fun vname cases value ->
   let rec try_cases = function
     | [] ->
@@ -113,8 +118,6 @@ and encode_variant : type v. string -> v Codec.case list -> v -> (Yojson.Safe.t,
       else try_cases rest
   in
   try_cases cases
-
-(* -- Decode: traverse JSON guided by GADT, produce OCaml value ------------ *)
 
 let rec decode : type a. a Codec.t -> Yojson.Safe.t -> (a, Codec.error) result =
   fun repr json ->
@@ -228,7 +231,9 @@ and decode_collection :
     Ok (finalize ())
   with Bail e -> Error e
 
-and decode_record : type f r. (f, r) Codec.fields -> (string * Yojson.Safe.t) list -> (f, Codec.error) result =
+and decode_record : type f r.
+  (f, r) Codec.fields -> (string * Yojson.Safe.t) list ->
+  (f, Codec.error) result =
   fun fields assoc ->
   match fields with
   | Codec.F0 { constructor; _ } -> Ok constructor
@@ -242,7 +247,8 @@ and decode_record : type f r. (f, r) Codec.fields -> (string * Yojson.Safe.t) li
      | Some j, _ ->
        let+ v = with_path name (decode repr j) in f v)
 
-and decode_variant : type v. string -> v Codec.case list -> Yojson.Safe.t -> (v, Codec.error) result =
+and decode_variant : type v.
+  string -> v Codec.case list -> Yojson.Safe.t -> (v, Codec.error) result =
   fun vname cases json ->
   match json with
   | `String name ->
@@ -268,22 +274,173 @@ and decode_variant : type v. string -> v Codec.case list -> Yojson.Safe.t -> (v,
     find cases
   | j -> type_error "variant (string or [name, arg])" j
 
-(* -- Driver --------------------------------------------------------------- *)
-
-include Codec.Make (struct
-  type t = Yojson.Safe.t
+(** AST-based driver: encode produces a [Yojson.Safe.t], decode
+    consumes one. Use this when you want to manipulate the AST itself
+    (composition, inspection). For raw serialization to a string or
+    channel, prefer the streaming [Writer] / record helpers below. *)
+module Raw = struct
   let encode = encode
   let decode = decode
+
+  let encode_exn codec v =
+    match encode codec v with
+    | Ok x -> x
+    | Error e -> raise (Codec.Error.Codec_error e)
+
+  let decode_exn codec raw =
+    match decode codec raw with
+    | Ok x -> x
+    | Error e -> raise (Codec.Error.Codec_error e)
+end
+
+(* -- Streaming WRITERs: parameterized by a low-level Sink ----------------- *)
+
+module type SINK = sig
+  type t
+  val add_char   : t -> char -> unit
+  val add_string : t -> string -> unit
+end
+
+(** Generates a JSON [Writer.S] for any sink type. The JSON syntax is
+    the same for all sinks; only the low-level character/string output
+    differs. *)
+module Json_writer (S : SINK) : Codec.Writer.S with type out = S.t = struct
+  type out = S.t
+
+  let add_escaped_string buf s =
+    S.add_char buf '"';
+    for i = 0 to String.length s - 1 do
+      match String.unsafe_get s i with
+      | '"'    -> S.add_string buf "\\\""
+      | '\\'   -> S.add_string buf "\\\\"
+      | '\n'   -> S.add_string buf "\\n"
+      | '\r'   -> S.add_string buf "\\r"
+      | '\t'   -> S.add_string buf "\\t"
+      | '\b'   -> S.add_string buf "\\b"
+      | '\012' -> S.add_string buf "\\f"
+      | c when Char.code c < 0x20 ->
+        S.add_string buf (Printf.sprintf "\\u%04x" (Char.code c))
+      | c      -> S.add_char buf c
+    done;
+    S.add_char buf '"'
+
+  (* [Float.to_string 1.0] returns ["1."]; append a trailing zero so
+     the output parses back as a float. *)
+  let add_float buf f =
+    let s = Float.to_string f in
+    S.add_string buf s;
+    let n = String.length s in
+    if n > 0 && s.[n - 1] = '.' then S.add_char buf '0'
+
+  let null   o = S.add_string o "null"
+  let bool   o b = S.add_string o (if b then "true" else "false")
+  let int    o i = S.add_string o (string_of_int i)
+  let int32  o i = S.add_string o (Int32.to_string i)
+  let int64  o i = S.add_string o (Int64.to_string i)
+  let float  o f = add_float o f
+  let char   o c = S.add_char o '"'; S.add_char o c; S.add_char o '"'
+  let string o s = add_escaped_string o s
+
+  let begin_array o = S.add_char o '['
+  let array_sep   o = S.add_char o ','
+  let end_array   o = S.add_char o ']'
+
+  let begin_object o = S.add_char o '{'
+  let key o ~first name =
+    if not first then S.add_char o ',';
+    add_escaped_string o name;
+    S.add_char o ':'
+  let end_object o = S.add_char o '}'
+
+  let variant_constant o name = add_escaped_string o name
+
+  let variant_payload o name write_payload =
+    S.add_char o '[';
+    add_escaped_string o name;
+    S.add_char o ',';
+    write_payload o;
+    S.add_char o ']'
+end
+
+(** Writer targeting a [Buffer.t]. *)
+module Buffer_writer = Json_writer (struct
+  type t = Buffer.t
+  let add_char   = Buffer.add_char
+  let add_string = Buffer.add_string
 end)
 
-let encode_string repr v =
-  let+ j = encode repr v in Yojson.Safe.to_string j
+(** Writer targeting an [out_channel]. *)
+module Channel_writer = Json_writer (struct
+  type t = out_channel
+  let add_char   = output_char
+  let add_string = output_string
+end)
 
-let decode_string repr s =
+(* -- Reader over Yojson.Safe.t ------------------------------------------- *)
+
+module Yojson_reader : Codec.Reader.S with type input = Yojson.Safe.t = struct
+  type input = Yojson.Safe.t
+
+  let null = function `Null -> Ok () | j -> type_error "null" j
+  let bool = function `Bool b -> Ok b | j -> type_error "bool" j
+  let int  = function `Int i -> Ok i | j -> type_error "int" j
+  let int32 = function `Int i -> Ok (Int32.of_int i) | j -> type_error "int" j
+  let int64 = function
+    | `Intlit s ->
+      (match Int64.of_string_opt s with
+       | Some i -> Ok i
+       | None -> Error (Codec.Error.make [] "invalid int64" ~got:s))
+    | `Int i -> Ok (Int64.of_int i)
+    | j -> type_error "int64" j
+  let float = function
+    | `Float f -> Ok f
+    | `Int i -> Ok (Float.of_int i)
+    | j -> type_error "float" j
+  let char = function
+    | `String s when String.length s = 1 -> Ok s.[0]
+    | `String _ ->
+      Error (Codec.Error.make [] "expected single character"
+               ~got:"multi-char string")
+    | j -> type_error "string" j
+  let string = function `String s -> Ok s | j -> type_error "string" j
+  let array = function `List l -> Ok l | j -> type_error "list" j
+  let object_ = function `Assoc a -> Ok a | j -> type_error "object" j
+end
+
+(* -- First-class records: pre-bridged for the common cases --------------- *)
+
+let buffer_encoder  : Buffer.t   Codec.encoder = Codec.Bridge.encoder (module Buffer_writer)
+let channel_encoder : out_channel Codec.encoder = Codec.Bridge.encoder (module Channel_writer)
+let yojson_decoder  : Yojson.Safe.t Codec.decoder = Codec.Bridge.decoder (module Yojson_reader)
+
+(** Pre-built driver: streaming encode to [Buffer.t], decode from
+    [Yojson.Safe.t]. *)
+let driver : (Buffer.t, Yojson.Safe.t) Codec.driver =
+  Codec.Bridge.driver (module Buffer_writer) (module Yojson_reader)
+
+(* -- Top-level convenience: encode/decode through a string --------------- *)
+
+let encode_string codec v =
+  let buf = Buffer.create 256 in
+  match buffer_encoder.encode codec v buf with
+  | Ok () -> Ok (Buffer.contents buf)
+  | Error _ as e -> e
+
+let decode_string codec s =
   match Yojson.Safe.from_string s with
-  | json -> decode repr json
   | exception Yojson.Json_error msg ->
     Error (Codec.Error.make [] msg ~expected:"valid JSON")
+  | ast -> yojson_decoder.decode codec ast
+
+let encode_string_exn codec v =
+  match encode_string codec v with
+  | Ok s -> s
+  | Error e -> raise (Codec.Error.Codec_error e)
+
+let decode_string_exn codec s =
+  match decode_string codec s with
+  | Ok v -> v
+  | Error e -> raise (Codec.Error.Codec_error e)
 
 (* ========================================================================== *)
 (*                                  Tests                                     *)
@@ -291,10 +448,10 @@ let decode_string repr s =
 
 let%test_module "Primitives" = (module struct
   let roundtrip repr v =
-    match encode repr v with
+    match Raw.encode repr v with
     | Error _ -> false
     | Ok json ->
-      (match decode repr json with
+      (match Raw.decode repr json with
        | Ok v' -> v = v'
        | Error _ -> false)
 
@@ -311,12 +468,12 @@ let%test_module "Primitives" = (module struct
   let%test "string empty" = roundtrip Codec.string ""
 
   let%expect_test "int encodes directly" =
-    let json = encode_exn Codec.int 42 in
+    let json = Raw.encode_exn Codec.int 42 in
     print_endline (Yojson.Safe.to_string json);
     [%expect {| 42 |}]
 
   let%expect_test "type mismatch error" =
-    (match decode Codec.int (`String "hello") with
+    (match Raw.decode Codec.int (`String "hello") with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| type mismatch (expected int, got string) |}]
@@ -324,10 +481,10 @@ end)
 
 let%test_module "Combinators" = (module struct
   let roundtrip repr v =
-    match encode repr v with
+    match Raw.encode repr v with
     | Error _ -> false
     | Ok json ->
-      (match decode repr json with
+      (match Raw.decode repr json with
        | Ok v' -> v = v'
        | Error _ -> false)
 
@@ -340,7 +497,7 @@ let%test_module "Combinators" = (module struct
   let%test "tuple3" = roundtrip Codec.(tuple3 int string bool) (1, "hi", true)
 
   let%expect_test "list error with path" =
-    (match decode Codec.(list int) (`List [ `Int 1; `String "bad" ]) with
+    (match Raw.decode Codec.(list int) (`List [ `Int 1; `String "bad" ]) with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| 1: type mismatch (expected int, got string) |}]
@@ -356,10 +513,10 @@ let%test_module "Records" = (module struct
     |> Codec.seal
 
   let roundtrip repr v =
-    match encode repr v with
+    match Raw.encode repr v with
     | Error _ -> false
     | Ok json ->
-      (match decode repr json with
+      (match Raw.decode repr json with
        | Ok v' -> v = v'
        | Error _ -> false)
 
@@ -367,7 +524,7 @@ let%test_module "Records" = (module struct
     roundtrip user_codec { name = "Alice"; age = 30 }
 
   let%expect_test "user to JSON" =
-    let json = encode_exn user_codec { name = "Alice"; age = 30 } in
+    let json = Raw.encode_exn user_codec { name = "Alice"; age = 30 } in
     print_endline (Yojson.Safe.pretty_to_string json);
     [%expect {| { "name": "Alice", "age": 30 } |}]
 
@@ -378,13 +535,13 @@ let%test_module "Records" = (module struct
     [%expect {| Bob, 25 |}]
 
   let%expect_test "missing field error" =
-    (match decode user_codec (`Assoc [ "name", `String "Alice" ]) with
+    (match Raw.decode user_codec (`Assoc [ "name", `String "Alice" ]) with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| age: missing required field (expected field 'age') |}]
 
   let%expect_test "wrong type error" =
-    (match decode user_codec (`Int 42) with
+    (match Raw.decode user_codec (`Int 42) with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected Ok");
     [%expect {| type mismatch (expected object, got int) |}]
@@ -402,7 +559,7 @@ let%test_module "Records" = (module struct
     roundtrip config_codec { host = "localhost"; port = 3000; debug = true }
 
   let%test "config defaults" =
-    match decode config_codec (`Assoc [ "host", `String "localhost" ]) with
+    match Raw.decode config_codec (`Assoc [ "host", `String "localhost" ]) with
     | Ok c -> c.host = "localhost" && c.port = 8080 && c.debug = false
     | Error _ -> false
 
@@ -418,7 +575,7 @@ let%test_module "Records" = (module struct
   let%test "field_opt None" = roundtrip with_opt_codec { label = "b"; value = None }
 
   let%test "field_opt missing" =
-    decode with_opt_codec (`Assoc [ "label", `String "c" ])
+    Raw.decode with_opt_codec (`Assoc [ "label", `String "c" ])
     = Ok { label = "c"; value = None }
 end)
 
@@ -433,10 +590,10 @@ let%test_module "Variants" = (module struct
     ]
 
   let roundtrip repr v =
-    match encode repr v with
+    match Raw.encode repr v with
     | Error _ -> false
     | Ok json ->
-      (match decode repr json with
+      (match Raw.decode repr json with
        | Ok v' -> v = v'
        | Error _ -> false)
 
@@ -445,7 +602,7 @@ let%test_module "Variants" = (module struct
   let%test "constant variant Blue" = roundtrip color_codec Blue
 
   let%expect_test "constant variant JSON" =
-    print_endline (Yojson.Safe.to_string (encode_exn color_codec Green));
+    print_endline (Yojson.Safe.to_string (Raw.encode_exn color_codec Green));
     [%expect {| "Green" |}]
 
   type shape =
@@ -469,11 +626,11 @@ let%test_module "Variants" = (module struct
   let%test "Point roundtrip" = roundtrip shape_codec Point
 
   let%expect_test "Circle JSON" =
-    print_endline (Yojson.Safe.to_string (encode_exn shape_codec (Circle 3.0)));
+    print_endline (Yojson.Safe.to_string (Raw.encode_exn shape_codec (Circle 3.0)));
     [%expect {| ["Circle",3.0] |}]
 
   let%expect_test "unknown case error" =
-    (match decode color_codec (`String "Purple") with
+    (match Raw.decode color_codec (`String "Purple") with
      | Error e -> print_string (Codec.Error.to_string e)
      | Ok _ -> print_string "unexpected");
     [%expect {| color: unknown variant case 'Purple' |}]
@@ -507,24 +664,24 @@ let%test_module "Map" = (module struct
 
   let%test "map roundtrip" =
     let v = Email "test@example.com" in
-    match encode email_codec v with
+    match Raw.encode email_codec v with
     | Error _ -> false
     | Ok json ->
-      (match decode email_codec json with
+      (match Raw.decode email_codec json with
        | Ok (Email s) -> s = "test@example.com"
        | Error _ -> false)
 
   let%expect_test "map encodes as underlying" =
-    print_endline (Yojson.Safe.to_string (encode_exn email_codec (Email "a@b.c")));
+    print_endline (Yojson.Safe.to_string (Raw.encode_exn email_codec (Email "a@b.c")));
     [%expect {| "a@b.c" |}]
 end)
 
 let%test_module "Nested" = (module struct
   let roundtrip repr v =
-    match encode repr v with
+    match Raw.encode repr v with
     | Error _ -> false
     | Ok json ->
-      (match decode repr json with
+      (match Raw.decode repr json with
        | Ok v' -> v = v'
        | Error _ -> false)
 
@@ -549,5 +706,44 @@ let%test_module "Nested" = (module struct
   (* Note: Some None and None both encode to `Null in JSON.
      This is an inherent limitation of the format — not a bug. *)
   let%test "nested option Some None decodes as None" =
-    encode_exn Codec.(option (option int)) (Some None) = `Null
+    Raw.encode_exn Codec.(option (option int)) (Some None) = `Null
+end)
+
+let%test_module "Streaming" = (module struct
+  (* The streaming encoder (Buffer-backed) must produce JSON
+     equivalent to the Raw driver, modulo formatting differences
+     (compact vs pretty, no AST involvement). *)
+
+  let roundtrip_string codec v =
+    match encode_string codec v with
+    | Error _ -> false
+    | Ok s ->
+      (match decode_string codec s with
+       | Ok v' -> v = v'
+       | Error _ -> false)
+
+  let%test "primitive int via string" = roundtrip_string Codec.int 42
+  let%test "primitive string via string" = roundtrip_string Codec.string "hello"
+  let%test "list of records via string" =
+    let codec =
+      Codec.record "p" (fun x y -> (x, y))
+      |> Codec.field "x" Codec.int fst
+      |> Codec.field "y" Codec.int snd
+      |> Codec.seal
+    in
+    roundtrip_string (Codec.list codec) [ (1, 2); (3, 4) ]
+
+  let%expect_test "streaming int" =
+    Printf.printf "%s" (encode_string_exn Codec.int 42);
+    [%expect {| 42 |}]
+
+  let%expect_test "streaming record" =
+    let codec =
+      Codec.record "p" (fun x y -> (x, y))
+      |> Codec.field "x" Codec.int fst
+      |> Codec.field "y" Codec.int snd
+      |> Codec.seal
+    in
+    Printf.printf "%s" (encode_string_exn codec (1, 2));
+    [%expect {| {"x":1,"y":2} |}]
 end)
