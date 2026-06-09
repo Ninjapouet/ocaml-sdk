@@ -62,15 +62,26 @@ module Yojson_reader : Codec.Reader.S with type input = Yojson.Safe.t
 
     First-class records produced from the modules above via
     {!Codec.Bridge}. Use these directly without instantiating any
-    functor. *)
+    functor. Grouped by role for discovery: pick an encoder by sink,
+    a decoder by source, a driver by the pair. *)
 
-val buffer_encoder  : Buffer.t Codec.encoder
-val channel_encoder : out_channel Codec.encoder
-val yojson_decoder  : Yojson.Safe.t Codec.decoder
+(** Encoders, one per common sink type. *)
+module Encoder : sig
+  val buffer  : Buffer.t Codec.encoder
+  val channel : out_channel Codec.encoder
+end
 
-(** Pre-cut driver: streaming encode to [Buffer.t], decode from
-    [Yojson.Safe.t]. *)
-val driver : (Yojson.Safe.t, Buffer.t) Codec.driver
+(** Decoders, one per common source type. *)
+module Decoder : sig
+  val yojson : Yojson.Safe.t Codec.decoder
+end
+
+(** Complete drivers: encode to a chosen sink, decode from the Yojson
+    AST. *)
+module Driver : sig
+  val buffer  : (Yojson.Safe.t, Buffer.t) Codec.driver
+  val channel : (Yojson.Safe.t, out_channel) Codec.driver
+end
 
 (** {1 Top-level convenience: string ↔ value}
 

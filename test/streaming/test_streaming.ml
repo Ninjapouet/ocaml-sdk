@@ -1,4 +1,4 @@
-(** Tests for the streaming framework via [Codec_yojson.buffer_encoder]
+(** Tests for the streaming framework via [Codec_yojson.Encoder.buffer]
     (the pre-built record built from [Buffer_writer]).
 
     Demonstrates that the generic streaming encoder writes JSON directly
@@ -9,7 +9,7 @@
 (** Encode via the pre-built record encoder, return the resulting string. *)
 let encode_to_string codec value =
   let buf = Buffer.create 256 in
-  match Codec_yojson.buffer_encoder.encode codec value buf with
+  match Codec_yojson.Encoder.buffer.encode codec value buf with
   | Ok () -> Buffer.contents buf
   | Error e -> raise (Codec.Error.Codec_error e)
 
@@ -80,7 +80,7 @@ let%expect_test "Make_writer accepts a caller-owned buffer" =
   ] in
   List.iter (fun us ->
     Buffer.clear buf;
-    match Codec_yojson.buffer_encoder.encode codec us buf with
+    match Codec_yojson.Encoder.buffer.encode codec us buf with
     | Ok () ->
       let s = Buffer.contents buf in
       print_endline s;

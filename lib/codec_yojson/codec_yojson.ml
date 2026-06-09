@@ -407,22 +407,34 @@ module Yojson_reader : Codec.Reader.S with type input = Yojson.Safe.t = struct
   let object_ = function `Assoc a -> Ok a | j -> type_error "object" j
 end
 
-(* -- First-class records: pre-bridged for the common cases --------------- *)
+(* -- Pre-bridged records, grouped by role -------------------------------- *)
 
-let buffer_encoder  : Buffer.t   Codec.encoder = Codec.Bridge.encoder (module Buffer_writer)
-let channel_encoder : out_channel Codec.encoder = Codec.Bridge.encoder (module Channel_writer)
-let yojson_decoder  : Yojson.Safe.t Codec.decoder = Codec.Bridge.decoder (module Yojson_reader)
+(** Encoders for the common sink types. *)
+module Encoder = struct
+  let buffer  : Buffer.t    Codec.encoder = Codec.Bridge.encoder (module Buffer_writer)
+  let channel : out_channel Codec.encoder = Codec.Bridge.encoder (module Channel_writer)
+end
 
-(** Pre-built driver: streaming encode to [Buffer.t], decode from
-    [Yojson.Safe.t]. *)
-let driver : (Yojson.Safe.t, Buffer.t) Codec.driver =
-  Codec.Bridge.driver (module Buffer_writer) (module Yojson_reader)
+(** Decoders for the common source types. *)
+module Decoder = struct
+  let yojson : Yojson.Safe.t Codec.decoder = Codec.Bridge.decoder (module Yojson_reader)
+end
+
+(** Pre-built drivers — one per sink type, all sharing the [Yojson_reader]
+    decoder side. *)
+module Driver = struct
+  let buffer : (Yojson.Safe.t, Buffer.t) Codec.driver =
+    Codec.Bridge.driver (module Buffer_writer) (module Yojson_reader)
+
+  let channel : (Yojson.Safe.t, out_channel) Codec.driver =
+    Codec.Bridge.driver (module Channel_writer) (module Yojson_reader)
+end
 
 (* -- Top-level convenience: encode/decode through a string --------------- *)
 
 let encode_string codec v =
   let buf = Buffer.create 256 in
-  match buffer_encoder.encode codec v buf with
+  match Encoder.buffer.encode codec v buf with
   | Ok () -> Ok (Buffer.contents buf)
   | Error _ as e -> e
 
@@ -430,7 +442,7 @@ let decode_string codec s =
   match Yojson.Safe.from_string s with
   | exception Yojson.Json_error msg ->
     Error (Codec.Error.make [] msg ~expected:"valid JSON")
-  | ast -> yojson_decoder.decode codec ast
+  | ast -> Decoder.yojson.decode codec ast
 
 let encode_string_exn codec v =
   match encode_string codec v with
