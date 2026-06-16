@@ -1,23 +1,27 @@
-(** Tests for the streaming framework via [Codec_yojson.Encoder.buffer]
-    (the pre-built record built from [Buffer_writer]).
+(** Tests for the [Marshal] library via the JSON instances from
+    [codec-yojson] ([Buffer_writer], [Channel_writer], [Yojson_reader]).
 
-    Demonstrates that the generic streaming encoder writes JSON directly
-    into a [Buffer.t] with no intermediate AST, and compares its
-    allocation footprint against [Codec_yojson.Raw.encode +
-    Yojson.Safe.to_string]. *)
+    Demonstrates that [Marshal.serialize] writes JSON directly into a
+    [Buffer.t] with no intermediate AST, and compares its allocation
+    footprint against the value-conversion path
+    ([Codec_yojson.to_yojson + Yojson.Safe.to_string]). *)
 
-(** Encode via the pre-built record encoder, return the resulting string. *)
+(** Encode via Marshal into a fresh Buffer, return the resulting string. *)
 let encode_to_string codec value =
   let buf = Buffer.create 256 in
-  match Codec_yojson.Encoder.buffer.encode codec value buf with
+  match
+    Marshal.serialize codec value
+      ~writer:(module Codec_yojson.Buffer_writer)
+      buf
+  with
   | Ok () -> Buffer.contents buf
   | Error e -> raise (Codec.Error.Codec_error e)
 
-(** Decode via the [Raw] driver after parsing with Yojson — used in
+(** Decode via Codec.Convert after parsing with Yojson — used in
     correctness tests to verify that streaming output round-trips. *)
 let parse_then_decode codec s =
   let json = Yojson.Safe.from_string s in
-  Codec_yojson.Raw.decode_exn codec json
+  Codec_yojson.of_yojson_exn codec json
 
 (* -- Correctness tests --------------------------------------------------- *)
 
@@ -67,10 +71,10 @@ let%expect_test "streaming escapes JSON special characters" =
   assert (parse_then_decode Codec.string s = raw);
   [%expect {| "line1\nline2\t\"quoted\"\\backslash\b\r\f" |}]
 
-(* The streaming encoder accepts a caller-owned [Buffer.t] — useful when
+(* [Marshal.serialize] accepts a caller-owned sink — useful when
    feeding a large sequence of small records into a single buffer (HTTP
    response body, log shipper, …) without reallocation between items. *)
-let%expect_test "Make_writer accepts a caller-owned buffer" =
+let%expect_test "Marshal.serialize accepts a caller-owned buffer" =
   let buf = Buffer.create 1024 in
   let codec = Codec.list user_codec in
   let chunks = [
@@ -80,7 +84,11 @@ let%expect_test "Make_writer accepts a caller-owned buffer" =
   ] in
   List.iter (fun us ->
     Buffer.clear buf;
-    match Codec_yojson.Encoder.buffer.encode codec us buf with
+    match
+      Marshal.serialize codec us
+        ~writer:(module Codec_yojson.Buffer_writer)
+        buf
+    with
     | Ok () ->
       let s = Buffer.contents buf in
       print_endline s;
@@ -92,13 +100,9 @@ let%expect_test "Make_writer accepts a caller-owned buffer" =
     [{"name":"Bob","age":22,"email":"b@x"},{"name":"Carol","age":40,"email":null}]
     |}]
 
-(* -- Allocation comparison: streaming vs Yojson AST -----------------------
+(* -- Allocation comparison: Marshal streaming vs Codec to_yojson --------- *)
 
-   The streaming path writes directly into a [Buffer.t]; the AST path
-   builds a [Yojson.Safe.t] first then serializes it to a string. We
-   measure the difference on a 50k-record dataset. *)
-
-let%test_unit "streaming framework allocates less than Yojson AST" =
+let%test_unit "Marshal streaming allocates less than Codec.to_yojson + dump" =
   let n = 50_000 in
   let users = List.init n (fun i ->
     { name  = Printf.sprintf "user_%d" i;
@@ -111,7 +115,7 @@ let%test_unit "streaming framework allocates less than Yojson AST" =
   (* Warm up to fault in pages. *)
   let _ = encode_to_string users_codec users in
   let _ =
-    Yojson.Safe.to_string (Codec_yojson.Raw.encode_exn users_codec users)
+    Yojson.Safe.to_string (Codec_yojson.to_yojson_exn users_codec users)
   in
 
   let measure label f =
@@ -122,18 +126,18 @@ let%test_unit "streaming framework allocates less than Yojson AST" =
     let t1 = Sys.time () in
     let after = Gc.allocated_bytes () in
     let mib = (after -. before) /. 1024. /. 1024. in
-    Printf.printf "  %-18s : %.3fs, %7.2f MiB allocated, output %d bytes\n"
+    Printf.printf "  %-22s : %.3fs, %7.2f MiB allocated, output %d bytes\n"
       label (t1 -. t0) mib (String.length result);
     (result, after -. before)
   in
 
   Printf.printf "Allocation comparison on %d records:\n" n;
   let s_stream, alloc_stream =
-    measure "streaming framework" (fun () -> encode_to_string users_codec users)
+    measure "Marshal streaming" (fun () -> encode_to_string users_codec users)
   in
   let s_ast, alloc_ast =
-    measure "Yojson AST + dump" (fun () ->
-      Yojson.Safe.to_string (Codec_yojson.Raw.encode_exn users_codec users))
+    measure "Codec to_yojson + dump" (fun () ->
+      Yojson.Safe.to_string (Codec_yojson.to_yojson_exn users_codec users))
   in
 
   assert (parse_then_decode users_codec s_stream = users);

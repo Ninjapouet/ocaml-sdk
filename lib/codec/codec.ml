@@ -245,225 +245,147 @@ let variant vname cases = Variant { vname; cases }
 
 type 'a codec = 'a t
 
-(* -- Drivers ------------------------------------------------------------- *)
-(*
-   Three-layer architecture, declared bottom-up:
+(* -- Value-conversion API -------------------------------------------------
 
-   - [Writer.S] / [Reader.S]    : format-primitive interfaces (the ~14
-                                  emit-token / ~10 extract-typed functions
-                                  a format must provide).
-   - [Encoder.S] / [Decoder.S]  : driver halves (one [encode] / [decode]
-                                  function each), produced from a Writer /
-                                  Reader by the [Make] functor.
-   - [Driver.S]                 : combined encode + decode, built from a
-                                  Writer and a Reader together.
+   [Writer.S] is a module of CONSTRUCTORS that build a value of type
+   [t] from OCaml primitives; [Reader.S] is a module of EXTRACTORS that
+   pull OCaml primitives from a value of type [t]. Both are pure and
+   value-based — no side effects, no sink.
 
-   The bottom layer (Writer/Reader) describes what a *format* offers;
-   the middle layer (Encoder/Decoder) is what a driver *consumes*. The
-   functors bridge the two.
-
-   The layers themselves are format-agnostic and not specifically
-   dedicated to streaming — streaming is just one efficient use case
-   (when the [Writer] targets a sink). A [Writer] could equally well
-   build a materialized value.
-
-   For first-class use, value-level [encoder] / [decoder] / [driver]
-   records are exposed alongside, and the [Bridge] sub-module converts
-   first-class modules into these records. *)
+   Use this for "I have an OCaml value, I want a Yojson.Safe.t"-style
+   conversions, or any other value-to-value transformation. For
+   sink-based serialization (write to a Buffer/channel without
+   materializing an intermediate value), use the [Marshal] library. *)
 
 module Writer = struct
   module type S = sig
-    type out
-
-    val null   : out -> unit
-    val bool   : out -> bool -> unit
-    val int    : out -> int -> unit
-    val int32  : out -> int32 -> unit
-    val int64  : out -> int64 -> unit
-    val float  : out -> float -> unit
-    val char   : out -> char -> unit
-    val string : out -> string -> unit
-
-    val begin_array : out -> unit
-    val array_sep   : out -> unit
-    val end_array   : out -> unit
-
-    val begin_object : out -> unit
-    val key          : out -> first:bool -> string -> unit
-    val end_object   : out -> unit
-
-    val variant_constant : out -> string -> unit
-    val variant_payload  : out -> string -> (out -> unit) -> unit
+    type t
+    val null   : t
+    val bool   : bool -> t
+    val int    : int -> t
+    val int32  : int32 -> t
+    val int64  : int64 -> t
+    val float  : float -> t
+    val char   : char -> t
+    val string : string -> t
+    val list   : t list -> t
+    val record : (string * t) list -> t
+    val variant_constant : string -> t
+    val variant_payload  : string -> t -> t
   end
 end
 
 module Reader = struct
   module type S = sig
-    type input
-
-    val null    : input -> (unit,   error) result
-    val bool    : input -> (bool,   error) result
-    val int     : input -> (int,    error) result
-    val int32   : input -> (int32,  error) result
-    val int64   : input -> (int64,  error) result
-    val float   : input -> (float,  error) result
-    val char    : input -> (char,   error) result
-    val string  : input -> (string, error) result
-    val array   : input -> (input list, error) result
-    val object_ : input -> ((string * input) list, error) result
+    type t
+    val null    : t -> (unit,   error) result
+    val bool    : t -> (bool,   error) result
+    val int     : t -> (int,    error) result
+    val int32   : t -> (int32,  error) result
+    val int64   : t -> (int64,  error) result
+    val float   : t -> (float,  error) result
+    val char    : t -> (char,   error) result
+    val string  : t -> (string, error) result
+    val list    : t -> (t list, error) result
+    val record  : t -> ((string * t) list, error) result
   end
 end
 
-module Encoder = struct
-  module type S = sig
-    type out
-    val encode : 'a codec -> 'a -> out -> (unit, error) result
-  end
+(* -- Internal: GADT traversal for encode --------------------------------- *)
 
-  module Make (W : Writer.S) : S with type out = W.out = struct
-  type out = W.out
+(* Encoding can fail only on an unmatched variant case; use an
+   exception internally and convert at the API boundary. *)
+exception Bail of error
 
-  (* Internal bail-out: errors are rare during encoding (the only
-     source is an unmatched variant case), so we use an exception to
-     keep the happy path allocation-free. *)
-  exception Bail of error
+let bail e = raise (Bail e)
 
-  let bail e = raise (Bail e)
+let with_path prefix f =
+  try f () with Bail e -> raise (Bail (Error.prepend_path prefix e))
 
-  let with_path prefix f =
-    try f () with Bail e -> raise (Bail (Error.prepend_path prefix e))
-
-  let rec encode_ : type a. a t -> a -> W.out -> unit =
-    fun repr value out ->
+let encode_via (type b)
+    (module W : Writer.S with type t = b)
+    (codec : 'a t) (value : 'a)
+  : b =
+  let rec go : type a. a t -> a -> b = fun repr v ->
     match repr with
-    | Unit   -> W.null out
-    | Bool   -> W.bool out value
-    | Int    -> W.int out value
-    | Int32  -> W.int32 out value
-    | Int64  -> W.int64 out value
-    | Float  -> W.float out value
-    | Char   -> W.char out value
-    | String -> W.string out value
+    | Unit   -> W.null
+    | Bool   -> W.bool v
+    | Int    -> W.int v
+    | Int32  -> W.int32 v
+    | Int64  -> W.int64 v
+    | Float  -> W.float v
+    | Char   -> W.char v
+    | String -> W.string v
     | Option r ->
-      (match value with
-       | None -> W.null out
-       | Some v -> encode_ r v out)
+      (match v with None -> W.null | Some x -> go r x)
     | Tuple2 (r1, r2) ->
-      let a, b = value in
-      W.begin_array out;
-      encode_ r1 a out; W.array_sep out;
-      encode_ r2 b out;
-      W.end_array out
+      let a, b = v in
+      W.list [ go r1 a; go r2 b ]
     | Tuple3 (r1, r2, r3) ->
-      let a, b, c = value in
-      W.begin_array out;
-      encode_ r1 a out; W.array_sep out;
-      encode_ r2 b out; W.array_sep out;
-      encode_ r3 c out;
-      W.end_array out
+      let a, b, c = v in
+      W.list [ go r1 a; go r2 b; go r3 c ]
     | Tuple4 (r1, r2, r3, r4) ->
-      let a, b, c, d = value in
-      W.begin_array out;
-      encode_ r1 a out; W.array_sep out;
-      encode_ r2 b out; W.array_sep out;
-      encode_ r3 c out; W.array_sep out;
-      encode_ r4 d out;
-      W.end_array out
+      let a, b, c, d = v in
+      W.list [ go r1 a; go r2 b; go r3 c; go r4 d ]
     | Tuple5 (r1, r2, r3, r4, r5) ->
-      let a, b, c, d, e = value in
-      W.begin_array out;
-      encode_ r1 a out; W.array_sep out;
-      encode_ r2 b out; W.array_sep out;
-      encode_ r3 c out; W.array_sep out;
-      encode_ r4 d out; W.array_sep out;
-      encode_ r5 e out;
-      W.end_array out
+      let a, b, c, d, e = v in
+      W.list [ go r1 a; go r2 b; go r3 c; go r4 d; go r5 e ]
     | Tuple6 (r1, r2, r3, r4, r5, r6) ->
-      let a, b, c, d, e, f = value in
-      W.begin_array out;
-      encode_ r1 a out; W.array_sep out;
-      encode_ r2 b out; W.array_sep out;
-      encode_ r3 c out; W.array_sep out;
-      encode_ r4 d out; W.array_sep out;
-      encode_ r5 e out; W.array_sep out;
-      encode_ r6 f out;
-      W.end_array out
+      let a, b, c, d, e, f = v in
+      W.list [ go r1 a; go r2 b; go r3 c; go r4 d; go r5 e; go r6 f ]
     | Collection { iter; element_codec; _ } ->
-      (* No per-element [with_path] wrapping: encoding errors during
-         the body are limited to variant-case lookup failures, which
-         carry their own path. Avoiding the closure allocation per
-         element pays off significantly on large collections. *)
-      W.begin_array out;
-      let first = ref true in
-      iter (fun elem ->
-        if !first then first := false else W.array_sep out;
-        encode_ element_codec elem out
-      ) value;
-      W.end_array out
+      let items = ref [] in
+      iter (fun elem -> items := go element_codec elem :: !items) v;
+      W.list (List.rev !items)
     | Record fields ->
-      W.begin_object out;
-      let (_ : bool) = encode_fields fields value out true in
-      W.end_object out
+      W.record (encode_fields fields v [])
     | Variant { vname; cases } ->
-      encode_variant vname cases value out
+      encode_variant vname cases v
     | Map { repr; backward; _ } ->
-      encode_ repr (backward value) out
+      go repr (backward v)
     | Lazy l ->
-      encode_ (Lazy.force l) value out
-
-  (* Fields stored outermost-last: recursing into [rest] before writing
-     this field yields declaration order. The bool threads through to
-     emit separators correctly. *)
+      go (Lazy.force l) v
   and encode_fields : type f r.
-    (f, r) fields -> r -> W.out -> bool -> bool =
-    fun fields value out first ->
+    (f, r) fields -> r -> (string * b) list -> (string * b) list =
+    fun fields v acc ->
     match fields with
-    | F0 _ -> first
+    | F0 _ -> acc
     | Field { rest; name; repr; get; _ } ->
-      let first = encode_fields rest value out first in
-      W.key out ~first name;
-      (* Same rationale as [Collection]: no per-field [with_path]
-         wrapping. *)
-      encode_ repr (get value) out;
-      false
-
-  and encode_variant : type v. string -> v case list -> v -> W.out -> unit =
-    fun vname cases value out ->
+      let item = (name, go repr (get v)) in
+      encode_fields rest v (item :: acc)
+  and encode_variant : type v. string -> v case list -> v -> b =
+    fun vname cases v ->
     let rec loop = function
-      | [] ->
-        bail (Error.make [ vname ] "no matching case for variant value")
+      | [] -> bail (Error.make [ vname ] "no matching case for variant value")
       | Case { name; repr; destruct; _ } :: rest ->
-        (match destruct value with
+        (match destruct v with
          | None -> loop rest
          | Some payload ->
-           W.variant_payload out name (fun out ->
-             with_path name (fun () -> encode_ repr payload out)))
+           W.variant_payload name
+             (with_path name (fun () -> go repr payload)))
       | Case0 { name; match_; _ } :: rest ->
-        if match_ value then W.variant_constant out name
-        else loop rest
+        if match_ v then W.variant_constant name else loop rest
     in
     loop cases
+  in
+  go codec value
 
-  let encode : 'a t -> 'a -> W.out -> (unit, error) result =
-    fun repr value out ->
-    try Ok (encode_ repr value out) with Bail e -> Error e
-  end
-end
+let encode (type b)
+    (codec : 'a t) (value : 'a)
+    ~(writer : (module Writer.S with type t = b))
+  : (b, error) result =
+  try Ok (encode_via writer codec value) with Bail e -> Error e
 
-module Decoder = struct
-  module type S = sig
-    type input
-    val decode : 'a codec -> input -> ('a, error) result
-  end
+(* -- Internal: GADT traversal for decode --------------------------------- *)
 
-  module Make (R : Reader.S) : S with type input = R.input = struct
-  type input = R.input
+let ( let* ) = Result.bind
+let ( let+ ) r f = Result.map f r
 
-  let ( let* ) = Result.bind
-  let ( let+ ) r f = Result.map f r
-
-  let rec decode : type a. a t -> R.input -> (a, error) result =
-    fun repr input ->
+let decode_via (type b)
+    (module R : Reader.S with type t = b)
+    (codec : 'a t) (input : b)
+  : ('a, error) result =
+  let rec go : type a. a t -> b -> (a, error) result = fun repr input ->
     match repr with
     | Unit   -> R.null input
     | Bool   -> R.bool input
@@ -474,88 +396,85 @@ module Decoder = struct
     | Char   -> R.char input
     | String -> R.string input
     | Option r ->
-      (* Try null first; on failure, recurse with the inner codec. *)
       (match R.null input with
        | Ok () -> Ok None
-       | Error _ -> let+ v = decode r input in Some v)
+       | Error _ -> let+ v = go r input in Some v)
     | Tuple2 (r1, r2) ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ j1; j2 ] ->
-         let* a = Error.with_path "0" (decode r1 j1) in
-         let+ b = Error.with_path "1" (decode r2 j2) in
+         let* a = Error.with_path "0" (go r1 j1) in
+         let+ b = Error.with_path "1" (go r2 j2) in
          (a, b)
        | Ok _ -> Error (Error.make [] "tuple2: wrong arity")
        | Error _ as e -> e)
     | Tuple3 (r1, r2, r3) ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ j1; j2; j3 ] ->
-         let* a = Error.with_path "0" (decode r1 j1) in
-         let* b = Error.with_path "1" (decode r2 j2) in
-         let+ c = Error.with_path "2" (decode r3 j3) in
+         let* a = Error.with_path "0" (go r1 j1) in
+         let* b = Error.with_path "1" (go r2 j2) in
+         let+ c = Error.with_path "2" (go r3 j3) in
          (a, b, c)
        | Ok _ -> Error (Error.make [] "tuple3: wrong arity")
        | Error _ as e -> e)
     | Tuple4 (r1, r2, r3, r4) ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ j1; j2; j3; j4 ] ->
-         let* a = Error.with_path "0" (decode r1 j1) in
-         let* b = Error.with_path "1" (decode r2 j2) in
-         let* c = Error.with_path "2" (decode r3 j3) in
-         let+ d = Error.with_path "3" (decode r4 j4) in
+         let* a = Error.with_path "0" (go r1 j1) in
+         let* b = Error.with_path "1" (go r2 j2) in
+         let* c = Error.with_path "2" (go r3 j3) in
+         let+ d = Error.with_path "3" (go r4 j4) in
          (a, b, c, d)
        | Ok _ -> Error (Error.make [] "tuple4: wrong arity")
        | Error _ as e -> e)
     | Tuple5 (r1, r2, r3, r4, r5) ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ j1; j2; j3; j4; j5 ] ->
-         let* a = Error.with_path "0" (decode r1 j1) in
-         let* b = Error.with_path "1" (decode r2 j2) in
-         let* c = Error.with_path "2" (decode r3 j3) in
-         let* d = Error.with_path "3" (decode r4 j4) in
-         let+ e = Error.with_path "4" (decode r5 j5) in
+         let* a = Error.with_path "0" (go r1 j1) in
+         let* b = Error.with_path "1" (go r2 j2) in
+         let* c = Error.with_path "2" (go r3 j3) in
+         let* d = Error.with_path "3" (go r4 j4) in
+         let+ e = Error.with_path "4" (go r5 j5) in
          (a, b, c, d, e)
        | Ok _ -> Error (Error.make [] "tuple5: wrong arity")
        | Error _ as e -> e)
     | Tuple6 (r1, r2, r3, r4, r5, r6) ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ j1; j2; j3; j4; j5; j6 ] ->
-         let* a = Error.with_path "0" (decode r1 j1) in
-         let* b = Error.with_path "1" (decode r2 j2) in
-         let* c = Error.with_path "2" (decode r3 j3) in
-         let* d = Error.with_path "3" (decode r4 j4) in
-         let* e = Error.with_path "4" (decode r5 j5) in
-         let+ f = Error.with_path "5" (decode r6 j6) in
+         let* a = Error.with_path "0" (go r1 j1) in
+         let* b = Error.with_path "1" (go r2 j2) in
+         let* c = Error.with_path "2" (go r3 j3) in
+         let* d = Error.with_path "3" (go r4 j4) in
+         let* e = Error.with_path "4" (go r5 j5) in
+         let+ f = Error.with_path "5" (go r6 j6) in
          (a, b, c, d, e, f)
        | Ok _ -> Error (Error.make [] "tuple6: wrong arity")
        | Error _ as e -> e)
     | Collection { builder; element_codec; _ } ->
-      (match R.array input with
+      (match R.list input with
        | Error _ as e -> e
        | Ok items ->
          let sink, finalize = builder () in
-         let exception Bail of error in
+         let exception B of error in
          (try
             List.iteri (fun i j ->
-              match Error.with_path (string_of_int i)
-                      (decode element_codec j) with
+              match Error.with_path (string_of_int i) (go element_codec j) with
               | Ok v -> sink v
-              | Error e -> raise (Bail e)
+              | Error e -> raise (B e)
             ) items;
             Ok (finalize ())
-          with Bail e -> Error e))
+          with B e -> Error e))
     | Record fields ->
-      (match R.object_ input with
+      (match R.record input with
        | Error _ as e -> e
        | Ok assoc -> decode_fields fields assoc)
     | Variant { vname; cases } ->
       decode_variant vname cases input
     | Map { repr; forward; _ } ->
-      let+ v = decode repr input in forward v
+      let+ v = go repr input in forward v
     | Lazy l ->
-      decode (Lazy.force l) input
-
+      go (Lazy.force l) input
   and decode_fields : type f r.
-    (f, r) fields -> (string * R.input) list -> (f, error) result =
+    (f, r) fields -> (string * b) list -> (f, error) result =
     fun fields assoc ->
     match fields with
     | F0 { constructor; _ } -> Ok constructor
@@ -569,18 +488,12 @@ module Decoder = struct
             Error (Error.make [ name ] "missing required field"
                      ~expected:(Printf.sprintf "field '%s'" name)))
        | Some j ->
-         (* If the field is present and null, fall back to default
-            (consistent with the Yojson driver's behavior). *)
          match R.null j, default with
          | Ok (), Some d -> Ok (f d)
          | _ ->
-           let+ v = Error.with_path name (decode repr j) in f v)
-
-  and decode_variant : type v.
-    string -> v case list -> R.input -> (v, error) result =
+           let+ v = Error.with_path name (go repr j) in f v)
+  and decode_variant : type v. string -> v case list -> b -> (v, error) result =
     fun vname cases input ->
-    (* Try string first (constant constructor); on failure try
-       array [name, arg] (constructor with payload). *)
     match R.string input with
     | Ok name ->
       let rec find = function
@@ -593,86 +506,29 @@ module Decoder = struct
       in
       find cases
     | Error _ ->
-      (match R.array input with
+      (match R.list input with
        | Ok [ name_j; arg_j ] ->
-         let* name =
-           Error.with_path "variant tag" (R.string name_j) in
+         let* name = Error.with_path "variant tag" (R.string name_j) in
          let rec find = function
            | [] ->
              Error (Error.make [ vname ]
                       (Printf.sprintf "unknown variant case '%s'" name))
            | Case { name = n; repr; construct; _ } :: _
              when String.equal n name ->
-             let+ v = Error.with_path name (decode repr arg_j) in
+             let+ v = Error.with_path name (go repr arg_j) in
              construct v
            | _ :: rest -> find rest
          in
          find cases
        | _ ->
          Error (Error.make [ vname ]
-                  "variant must be a string (constant) or a [name, arg] array"))
-  end
-end
+                  "variant must be a string (constant) or a [name, arg] list"))
+  in
+  go codec input
 
-module Driver = struct
-  module type S = sig
-    type out
-    type input
-    include Encoder.S with type out := out
-    include Decoder.S with type input := input
-  end
-
-  module Make (W : Writer.S) (R : Reader.S) : S
-    with type out = W.out
-     and type input = R.input
-  = struct
-    type out = W.out
-    type input = R.input
-    module E = Encoder.Make (W)
-    module D = Decoder.Make (R)
-    let encode = E.encode
-    let decode = D.decode
-  end
-end
-
-(* -- First-class records, built from modules via [Bridge] ----------------- *)
-
-type 'out encoder = {
-  encode : 'a. 'a codec -> 'a -> 'out -> (unit, error) result;
-}
-
-type 'input decoder = {
-  decode : 'a. 'a codec -> 'input -> ('a, error) result;
-}
-
-type ('input, 'output) driver = {
-  encoder : 'output encoder;
-  decoder : 'input decoder;
-}
-
-module Bridge = struct
-  let encoder (type o) (module W : Writer.S with type out = o) : o encoder =
-    let module E = Encoder.Make (W) in
-    { encode = E.encode }
-
-  let decoder (type i) (module R : Reader.S with type input = i) : i decoder =
-    let module D = Decoder.Make (R) in
-    { decode = D.decode }
-
-  let driver
-    (type o) (type i)
-    (module W : Writer.S with type out = o)
-    (module R : Reader.S with type input = i)
-    : (i, o) driver
-    =
-    { encoder = encoder (module W);
-      decoder = decoder (module R) }
-end
-
-(* -- Toplevel encode/decode: apply a driver's appropriate half ----------- *)
-
-let encode (driver : (_, 'o) driver) codec v (out : 'o) =
-  driver.encoder.encode codec v out
-
-let decode (driver : ('i, _) driver) codec (input : 'i) =
-  driver.decoder.decode codec input
+let decode (type b)
+    (codec : 'a t)
+    ~(reader : (module Reader.S with type t = b))
+    (input : b)
+  : ('a, error) result =
+  decode_via reader codec input

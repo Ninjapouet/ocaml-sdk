@@ -1,95 +1,36 @@
-(** Codec_yojson — Yojson-backed JSON drivers for the Codec library.
+(** Codec_yojson — Yojson instances for the [Codec] and [Marshal]
+    libraries.
 
-    Two encoding paths coexist:
+    {1 Pure value conversion (Codec)}
 
-    {ul
-    {- {!module:Raw}: encode produces a [Yojson.Safe.t], decode consumes
-       one. Use it when you want to inspect or compose the AST.}
-    {- {!module:Buffer_writer} / {!module:Channel_writer}: streaming
-       writers that emit JSON syntax directly to a target ([Buffer.t],
-       [out_channel], …) — no intermediate AST. Plug them into
-       {!Codec.Encoder.Make} (or use the pre-built record helpers
-       below).}}
+    Convert OCaml values to/from {!Yojson.Safe.t} via the
+    {!Codec} value-conversion API. *)
 
-    For symmetric decoding, the parser side reuses Yojson via
-    {!module:Yojson_reader} (an instance of {!Codec.Reader.S}).
+module Writer : Codec.Writer.S with type t = Yojson.Safe.t
+module Reader : Codec.Reader.S with type t = Yojson.Safe.t
 
-    {2 Quick start}
+val to_yojson : 'a Codec.codec -> 'a -> (Yojson.Safe.t, Codec.error) result
+val of_yojson : 'a Codec.codec -> Yojson.Safe.t -> ('a, Codec.error) result
 
-    {[
-      type user = { name : string; age : int }
-      [@@deriving codec]
+val to_yojson_exn : 'a Codec.codec -> 'a -> Yojson.Safe.t
+val of_yojson_exn : 'a Codec.codec -> Yojson.Safe.t -> 'a
 
-      (* Easiest path: encode/decode through a string. *)
-      let s = Codec_yojson.encode_string_exn user_codec u in
-      let u = Codec_yojson.decode_string_exn user_codec s
+(** {1 Sink-based streaming (Marshal)}
 
-      (* Or with the pre-built record encoders/decoder/driver. *)
-      let buf = Buffer.create 256 in
-      let () = (Codec_yojson.buffer_encoder.encode user_codec u buf
-                |> Result.get_ok)
-      in
-      let json_string = Buffer.contents buf
-    ]}
-*)
+    Stream JSON syntax to a [Buffer.t] or [out_channel] without
+    materializing an intermediate {!Yojson.Safe.t}. *)
 
-(** {1 Raw: encode/decode via [Yojson.Safe.t]} *)
+module Buffer_writer  : Marshal.Writer.S with type out = Buffer.t
+module Channel_writer : Marshal.Writer.S with type out = out_channel
+module Yojson_reader  : Marshal.Reader.S with type input = Yojson.Safe.t
 
-(** AST-based encode/decode. Useful when the caller wants to manipulate
-    the JSON value (composition, inspection). For raw serialization to
-    a string or channel, prefer the streaming helpers below. *)
-module Raw : sig
-  val encode     : 'a Codec.codec -> 'a -> (Yojson.Safe.t, Codec.error) result
-  val decode     : 'a Codec.codec -> Yojson.Safe.t -> ('a, Codec.error) result
-  val encode_exn : 'a Codec.codec -> 'a -> Yojson.Safe.t
-  val decode_exn : 'a Codec.codec -> Yojson.Safe.t -> 'a
-end
+(** {1 Convenience: string ↔ value}
 
-(** {1 Streaming JSON writers (module form)}
+    Encoding goes through {!Buffer_writer} (no AST allocated).
+    Decoding uses [Yojson.Safe.from_string] then {!Yojson_reader}. *)
 
-    A {!type:Codec.Writer.S} for each common sink type. Combine with
-    {!Codec.Encoder.Make}, or use the {{!records}pre-built records}
-    below. *)
+val to_string : 'a Codec.codec -> 'a -> (string, Codec.error) result
+val of_string : 'a Codec.codec -> string -> ('a, Codec.error) result
 
-module Buffer_writer  : Codec.Writer.S with type out = Buffer.t
-module Channel_writer : Codec.Writer.S with type out = out_channel
-
-(** {1 Reader over Yojson AST (module form)} *)
-
-module Yojson_reader : Codec.Reader.S with type input = Yojson.Safe.t
-
-(** {1:records Pre-built records (value form)}
-
-    First-class records produced from the modules above via
-    {!Codec.Bridge}. Use these directly without instantiating any
-    functor. Grouped by role for discovery: pick an encoder by sink,
-    a decoder by source, a driver by the pair. *)
-
-(** Encoders, one per common sink type. *)
-module Encoder : sig
-  val buffer  : Buffer.t Codec.encoder
-  val channel : out_channel Codec.encoder
-end
-
-(** Decoders, one per common source type. *)
-module Decoder : sig
-  val yojson : Yojson.Safe.t Codec.decoder
-end
-
-(** Complete drivers: encode to a chosen sink, decode from the Yojson
-    AST. *)
-module Driver : sig
-  val buffer  : (Yojson.Safe.t, Buffer.t) Codec.driver
-  val channel : (Yojson.Safe.t, out_channel) Codec.driver
-end
-
-(** {1 Top-level convenience: string ↔ value}
-
-    Encoding goes through {!val:buffer_encoder} (streaming, no AST
-    allocated). Decoding parses with [Yojson.Safe.from_string] then
-    runs {!val:yojson_decoder}. *)
-
-val encode_string : 'a Codec.codec -> 'a -> (string, Codec.error) result
-val decode_string : 'a Codec.codec -> string -> ('a, Codec.error) result
-val encode_string_exn : 'a Codec.codec -> 'a -> string
-val decode_string_exn : 'a Codec.codec -> string -> 'a
+val to_string_exn : 'a Codec.codec -> 'a -> string
+val of_string_exn : 'a Codec.codec -> string -> 'a

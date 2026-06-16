@@ -1,0 +1,4 @@
+(library
+ (name marshal)
+ (public_name marshal)
+ (libraries codec))

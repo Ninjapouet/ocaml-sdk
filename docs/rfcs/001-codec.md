@@ -1119,6 +1119,176 @@ Implemented and tested:
 - All callers (examples, ppx test) migrated from `Codec_yojson.encode`
   to `Codec_yojson.Raw.encode`.
 
+## Amendment 3: Split into two libraries — `codec` and `marshal`
+
+### Context
+
+After several iterations on Amendment 2's unified driver framework,
+a conceptual issue surfaced: we were trying to unify two operations
+that are different *by nature*.
+
+- **Codec-style** transformations *create* a new value: OCaml ↔
+  `Yojson.Safe.t`, OCaml ↔ S-expression, etc. Pure. No sink, no side
+  effect. The encoder builds the result; the decoder consumes a
+  provided value.
+- **Marshal-style** serialization *writes into a caller-provided
+  sink* (a `Buffer.t`, an `out_channel`, a socket): no intermediate
+  value, just side effects on the sink. Symmetrically the
+  deserializer reads from an already-parsed input.
+
+Trying to express both with a single Writer/Reader interface forced
+phantom-typed type-state, unified record encoders, and other
+gymnastics — and never quite landed. The two operations don't really
+*want* to be the same shape: one creates, one mutates.
+
+### Decision
+
+Split into two libraries, sharing the same {!Codec.t} dynamic type:
+
+- **`codec`** — the GADT plus a pure value-conversion API ({!Codec.encode}
+  / {!Codec.decode}). Writer is a module of constructors that build
+  a value of type `'b`; Reader is a module of extractors that pull
+  primitives out of a `'b`.
+- **`marshal`** — sink/source serialization. Depends on `codec`.
+  Writer is a module of side-effecting token emitters; Reader is a
+  module of extractors on a parsed input.
+
+Both libraries share `'a Codec.t` — a single type description drives
+both APIs.
+
+```ocaml
+(* codec library *)
+module Writer : sig module type S = sig
+  type t
+  val null : t  val bool : bool -> t  val int : int -> t  ...
+  val list : t list -> t  val record : (string * t) list -> t
+  val variant_constant : string -> t
+  val variant_payload  : string -> t -> t
+end end
+
+module Reader : sig module type S = sig
+  type t
+  val null : t -> (unit, error) result
+  ... (* extractors with results *)
+end end
+
+val encode :
+  'a t -> 'a ->
+  writer:(module Writer.S with type t = 'b) ->
+  ('b, error) result
+
+val decode :
+  'a t ->
+  reader:(module Reader.S with type t = 'b) ->
+  'b ->
+  ('a, error) result
+```
+
+```ocaml
+(* marshal library *)
+module Writer : sig module type S = sig
+  type out
+  val null : out -> unit  val bool : out -> bool -> unit  ...
+  val begin_array / array_sep / end_array : out -> unit
+  val begin_object / end_object : out -> unit
+  val key : out -> first:bool -> string -> unit
+  val variant_constant : out -> string -> unit
+  val variant_payload  : out -> string -> (out -> unit) -> unit
+end end
+
+module Reader : sig module type S = sig
+  type input
+  val null : input -> (unit, Codec.error) result
+  ... (* same extractors as Codec.Reader, plus array / object_ *)
+end end
+
+val serialize :
+  'a Codec.t -> 'a ->
+  writer:(module Writer.S with type out = 's) ->
+  's ->
+  (unit, Codec.error) result
+
+val deserialize :
+  'a Codec.t ->
+  reader:(module Reader.S with type input = 'i) ->
+  'i ->
+  ('a, Codec.error) result
+```
+
+`codec-yojson` provides instances for both APIs:
+
+```ocaml
+(* For Codec.Writer / Codec.Reader (value conversion) *)
+module Writer : Codec.Writer.S with type t = Yojson.Safe.t
+module Reader : Codec.Reader.S with type t = Yojson.Safe.t
+
+val to_yojson : 'a Codec.codec -> 'a -> (Yojson.Safe.t, Codec.error) result
+val of_yojson : 'a Codec.codec -> Yojson.Safe.t -> ('a, Codec.error) result
+
+(* For Marshal.Writer / Marshal.Reader (sink-based) *)
+module Buffer_writer  : Marshal.Writer.S with type out = Buffer.t
+module Channel_writer : Marshal.Writer.S with type out = out_channel
+module Yojson_reader  : Marshal.Reader.S with type input = Yojson.Safe.t
+
+(* Convenience: string <-> value via Marshal + yojson parser *)
+val to_string : 'a Codec.codec -> 'a -> (string, Codec.error) result
+val of_string : 'a Codec.codec -> string -> ('a, Codec.error) result
+```
+
+### Use cases mapped to API choice
+
+| You want… | You use |
+| --- | --- |
+| Manipulate a Yojson AST after encoding | `Codec_yojson.to_yojson` |
+| Decode from an AST you already have | `Codec_yojson.of_yojson` |
+| Stream into a Buffer for a hot path | `Marshal.serialize ~writer:(module Codec_yojson.Buffer_writer)` |
+| Write JSON straight to stdout / a file | `Marshal.serialize ~writer:(module Codec_yojson.Channel_writer)` |
+| Just give me a string from a value | `Codec_yojson.to_string` |
+| Just give me a value from a string | `Codec_yojson.of_string` |
+
+### Compatibility of the GADT
+
+The {!Codec.t} GADT — primitives, `Option`, `Tuple*`, `Collection`,
+`Record`, `Variant`, `Map`, `Lazy` — is unchanged and shared. In
+particular, `Collection` (with its `iter` / `builder` / `element_codec`
+fields) is *protocol-independent*: `iter` is used by both libs to walk
+a container during encoding, `builder` is used by both libs to
+accumulate during decoding. The `Codec.Map.Make` / `Codec.Set.Make`
+functors stay in `codec` and produce values that both APIs traverse
+the same way.
+
+### Why "Marshal"
+
+The OCaml stdlib has a `Marshal` module (binary serialization of
+runtime values). The name collides at use site (a user that opens our
+`Marshal` will shadow the stdlib one). Considered alternatives:
+`Codec_io`, `Wire`, `Serial`, `Stream`. `Marshal` was preferred for
+clarity ("marshal" is the standard term for serialization in the
+wider literature); users can always alias if the shadowing bothers
+them.
+
+### Status
+
+Implemented:
+- `lib/codec/codec.{ml,mli}`: GADT and combinators unchanged.
+  Old `Writer.S`/`Reader.S`/`Encoder`/`Decoder`/`Driver`/`Bridge`
+  and the record types removed. New {!Codec.Writer.S} / {!Codec.Reader.S}
+  module types (constructor / extractor) plus toplevel
+  {!Codec.encode} / {!Codec.decode}.
+- `lib/marshal/`: new library, depends on `codec`. Provides
+  {!Marshal.Writer.S} / {!Marshal.Reader.S} and
+  {!Marshal.serialize} / {!Marshal.deserialize}.
+- `lib/codec_yojson/`: instances for both APIs. Old `Raw` /
+  `Buffer_writer` (as `Codec.Writer.S`) / `Encoder` records removed.
+  New `Writer` / `Reader` (Yojson AST), `Buffer_writer` /
+  `Channel_writer` / `Yojson_reader` (for Marshal),
+  `to_yojson` / `of_yojson` / `to_string` / `of_string` convenience.
+- `test/streaming/test_streaming.ml`: uses `Marshal.serialize ~writer:
+  (module Codec_yojson.Buffer_writer)`. Benchmark on 50k records:
+  11.35 MiB allocated by `Marshal` streaming vs 29.40 MiB by
+  `to_yojson + Yojson.Safe.to_string` (ratio ≈ 0.39).
+- All callers (examples, ppx test) migrated.
+
 ## Open Questions
 
 1. **Naming**: Should the library be called `codec`, `encoding`, `serial`, or

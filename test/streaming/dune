@@ -1,5 +1,5 @@
 (library
  (name test_streaming)
  (inline_tests)
- (libraries codec codec-yojson yojson)
+ (libraries codec marshal codec-yojson yojson)
  (preprocess (pps ppx_codec ppx_inline_test ppx_expect)))

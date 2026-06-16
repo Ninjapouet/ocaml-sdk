@@ -21,13 +21,25 @@
   (ppx_expect :with-test)))
 
 (package
- (name codec-yojson)
- (synopsis "Yojson driver for the codec library")
+ (name marshal)
+ (synopsis "Sink-based streaming serialization for the codec library")
  (description
-  "Serializes OCaml types to JSON via Yojson, guided by Codec type representations. No intermediate copy.")
+  "Serializes/deserializes values described by a Codec.t into/from a caller-provided sink/source. Same type description as codec, different API (side effects, no intermediate value).")
  (depends
   (ocaml (>= 5.1))
   (codec (= :version))
+  (ppx_inline_test :with-test)
+  (ppx_expect :with-test)))
+
+(package
+ (name codec-yojson)
+ (synopsis "Yojson driver for the codec and marshal libraries")
+ (description
+  "Provides Yojson-based instances for both Codec (value conversion to/from Yojson.Safe.t) and Marshal (streaming JSON to/from Buffer.t, out_channel, and the Yojson AST).")
+ (depends
+  (ocaml (>= 5.1))
+  (codec (= :version))
+  (marshal (= :version))
   (yojson (>= 2.0))
   (ppx_inline_test :with-test)
   (ppx_expect :with-test)))

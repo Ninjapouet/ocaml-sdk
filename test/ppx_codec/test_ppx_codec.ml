@@ -9,17 +9,17 @@
 
 (** Encode [v], print the JSON, then check that decoding it returns [v]. *)
 let show_roundtrip codec v =
-  let json = Codec_yojson.Raw.encode_exn codec v in
+  let json = Codec_yojson.to_yojson_exn codec v in
   print_endline (Yojson.Safe.to_string json);
-  let decoded = Codec_yojson.Raw.decode_exn codec json in
+  let decoded = Codec_yojson.of_yojson_exn codec json in
   assert (decoded = v)
 
 (** Roundtrip without printing — for codecs whose encoded form is not
     deterministic (e.g. Hashtbl iteration order). [~check] inspects the
     decoded value with a custom predicate instead of structural equality. *)
 let check_roundtrip_with codec v ~check =
-  let json = Codec_yojson.Raw.encode_exn codec v in
-  let decoded = Codec_yojson.Raw.decode_exn codec json in
+  let json = Codec_yojson.to_yojson_exn codec v in
+  let decoded = Codec_yojson.of_yojson_exn codec json in
   assert (check decoded)
 
 (* -- Type alias ----------------------------------------------------------- *)
@@ -52,7 +52,7 @@ let%expect_test "record with defaults: all fields present" =
 
 let%expect_test "record with defaults: missing fields fall back" =
   let json = `Assoc [ "host", `String "localhost" ] in
-  let c = Codec_yojson.Raw.decode_exn config_codec json in
+  let c = Codec_yojson.of_yojson_exn config_codec json in
   Printf.printf "host=%s port=%d debug=%b" c.host c.port c.debug;
   [%expect {| host=localhost port=8080 debug=false |}]
 
@@ -73,7 +73,7 @@ let%expect_test "field_opt: None encodes as null" =
 
 let%expect_test "field_opt: missing field decodes as None" =
   let json = `Assoc [ "label", `String "c" ] in
-  let v = Codec_yojson.Raw.decode_exn with_opt_codec json in
+  let v = Codec_yojson.of_yojson_exn with_opt_codec json in
   assert (v = { label = "c"; value = None });
   [%expect {| |}]
 
@@ -182,9 +182,9 @@ type lazy_stream = int Seq.t [@@deriving codec]
 
 let%expect_test "Seq.t via ppx" =
   let s = List.to_seq [ 1; 2; 3 ] in
-  let json = Codec_yojson.Raw.encode_exn lazy_stream_codec s in
+  let json = Codec_yojson.to_yojson_exn lazy_stream_codec s in
   print_endline (Yojson.Safe.to_string json);
-  let s' = Codec_yojson.Raw.decode_exn lazy_stream_codec json in
+  let s' = Codec_yojson.of_yojson_exn lazy_stream_codec json in
   assert (List.of_seq s' = [ 1; 2; 3 ]);
   [%expect {| [1,2,3] |}]
 
